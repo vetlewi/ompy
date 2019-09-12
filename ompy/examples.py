@@ -71,27 +71,3 @@ def ones(shape: Tuple[int, int]) -> Matrix:
     mat = np.tril(mat)
     return Matrix(values=mat)
 
-
-def all_generations_trivial(shape: Tuple[int, int],
-         ret_firstgen: bool = False) -> Union[Tuple[Matrix, Matrix], Matrix]:
-    """ Creates a mock all generations matrix
-
-    A 5×5 looks like this:
-        ██▓▓▒▒░░░░
-        ▓▓▒▒░░░░
-        ▒▒░░░░
-        ░░░░
-        ░░
-    Args:
-        shape: The shape of the matrix
-    Returns:
-        The matrix
-    """
-    mat = Matrix(shape=shape)
-    for row, col in mat.iter():
-        if col <= row:
-            mat[row, col] = row - col + 1
-    if ret_firstgen:
-        return mat, ones(shape)
-    return mat
-

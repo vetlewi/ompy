@@ -269,8 +269,50 @@ class FirstGeneration:
                              " be either 'statistical' or 'total'")
 
 
-
 def normalize_rows(array: np.ndarray) -> np.ndarray:
     """ Normalize each row to unity """
     return div0(array, array.sum(axis=1).reshape(array.shape[1], 1))
     # return div0(array, array.sum(axis=1)[:, np.newaxis])
+
+
+def ag_from_fg(fg: Matrix, xs: Optional[np.ndarray] = None) -> Matrix:
+    """Create all generation matrix from first generations matrix
+
+    Args:
+        fg (Matrix): First generations matrix
+        xs (np.ndarray, optional): Population cross-section for each Ex bin
+                                   (in #times populated, not mb)
+    Returns:
+        ag (Matrix): All generations matrix
+
+    """
+    if xs is None:
+        xs = np.ones(fg.Ex.size)
+
+    fg_matrix = fg
+    fg = fg.values
+
+    # # # weights are the FG matrix "flipped" around Eg_center
+    # # # TODO: Check what happens for the elements "above" the diagonal
+    # Wrong!
+    # w = np.tril(fg)
+    # w = np.flip(w, axis=1)
+
+    w = np.zeros_like(fg)
+    for i in range(w.shape[0]):  # Loop over Ex rows
+        w[i, :i+1] = fg[i, i::-1]
+    w = normalize_rows(w)
+
+    ag = np.zeros_like(fg)
+    for i, Ex in enumerate(fg_matrix.Ex):
+        ag[i, :] = fg[i, :]/fg[i, :].sum() * xs[i]  # 1 fg per population
+        if i == 0:
+            continue
+        else:
+            # print("")
+            for j in range(i):
+                # print("i: {}, j: {}, w[{}, {}] = {}".format(i, j, i, j, w[i, j]))
+                # print("ag[{}, :]: {}".format(j, ag[j, :]))
+                ag[i, :] += xs[i] * w[i, j] * ag[j, :] / xs[j]
+
+    return Matrix(ag, Eg=fg_matrix.Eg, Ex=fg_matrix.Ex)
