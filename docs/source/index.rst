@@ -7,6 +7,7 @@ Welcome to OMpy's documentation!
    :caption: Contents:
 
    install
+   test
    getting_started
    API/index
 
