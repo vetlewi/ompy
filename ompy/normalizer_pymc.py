@@ -23,7 +23,7 @@ from .filehandling import load_discrete
 from .models import ResultsNormalized, NormalizationParameters
 from .abstract_normalizer import AbstractNormalizer
 #from .GamGamIntegrator import GamGamIntegrator,SpinDist,GamGamFuctional, GamGam
-#from .gsf_functions import SLMO_model, SLO_model, UB_model
+from .gsf_functions import SLMO_model, SLO_model, UB_model
 
 class NormalizerPYMC(AbstractNormalizer):
     """ A re-implementation of the NormalizeNLD class using the
@@ -175,7 +175,7 @@ class NormalizerPYMC(AbstractNormalizer):
             return tbl
 
         hdr = ['A', 'B', 'α', 'T', 'Eshift', 'ϵ', 'ν']
-        hdr2 = ['B', 'α', 'gsf_ϵ', 'gsf_ν']
+        hdr2 = ['rhoSn', 'D0', 'gsf_ϵ', 'gsf_ν']
         hdr3 = ['gdr_mean', 'gdr_width', 'gdr_size', 'sf_mean', 'sf_width', 'sf_size', 'beta', 'gamma']
 
         self.LOG.info("pyMC3 results:\n%s", tbl_str(trace, [hdr,hdr2,hdr3]))
