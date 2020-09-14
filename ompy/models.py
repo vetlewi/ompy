@@ -391,6 +391,14 @@ class NormalizationParameters(Model):
     """Storage for normalization parameters + some convenience functions
     """
 
+    # Element number
+    Z: int = field(default=0,
+        metadata="Element number")
+
+    # Mass number
+    A: int = field(default=0,
+        metadata="Mass number")
+
     #: Average s-wave resonance spacing D0 [eV]
     D0: Optional[Tuple[float, float]] = field(default=None,
             metadata='Average s-wave resonance spacing D0 [eV]')  # noqa
@@ -418,6 +426,10 @@ class NormalizationParameters(Model):
     #: Parameters necessary for the spin cut model
     spincutPars: Dict[str, Any] = field(default=None,
             metadata='parameters necessary for the spin cut model')  # noqa
+
+    # gSF model
+    GSFmodelPars: Optional[Dict[str, Any]] = field(default=None,
+            metadata='parameters necessary for the gsf model')
 
     def E_grid(self,
                retstep: bool = True) -> Union[np.ndarray, Tuple[np.ndarray, float]]:
@@ -475,6 +487,8 @@ class ResultsNormalized(Model):
     #: (List[Callable[..., Any]]): nld model for each nld
     nld_model: List[Callable[..., Any]] = field(default_factory=list,
             metadata='nld model')  # noqa
+    nld_model_err: List[Callable[..., Any]] = field(default_factory=list,
+            metadata='nld model err')  # noqa
     #: List[AbstractExtrapolationModel]: gsf model at low Eγ for each gsf
     gsf_model_low: List[AbstractExtrapolationModel] = \
         field(default_factory=list, metadata='gsf model at low Eγ')  # noqa
