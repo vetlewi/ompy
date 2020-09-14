@@ -22,8 +22,8 @@ from .spinfunctions import SpinFunctions
 from .filehandling import load_discrete
 from .models import ResultsNormalized, NormalizationParameters
 from .abstract_normalizer import AbstractNormalizer
-from .GamGamIntegrator import GamGamIntegrator,SpinDist,GamGamFuctional, GamGam
-from .gsf_functions import SLMO_model, SLO_model, UB_model
+#from .GamGamIntegrator import GamGamIntegrator,SpinDist,GamGamFuctional, GamGam
+#from .gsf_functions import SLMO_model, SLO_model, UB_model
 
 class NormalizerPYMC(AbstractNormalizer):
     """ A re-implementation of the NormalizeNLD class using the
