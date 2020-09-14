@@ -44,6 +44,7 @@ else:
     from .decomposition import nld_T_product, index
     from .normalizer_nld import (NormalizerNLD, load_levels_discrete,
                                  load_levels_smooth)
+    from .normalizer_pymc import NormalizerPYMC
     from .normalizer_gsf import NormalizerGSF
     from .normalizer_simultan import NormalizerSimultan
     from .ensembleNormalizer import EnsembleNormalizer
