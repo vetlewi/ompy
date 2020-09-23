@@ -45,8 +45,11 @@ else:
     from .normalizer_nld import (NormalizerNLD, load_levels_discrete,
                                  load_levels_smooth)
     from .normalizer_pymc import NormalizerPYMC
+    from .normalizer_sim import NormalizerSim
     from .normalizer_gsf import NormalizerGSF
     from .normalizer_simultan import NormalizerSimultan
     from .ensembleNormalizer import EnsembleNormalizer
     from .models import NormalizationParameters, ResultsNormalized
     from .introspection import logging, hooks
+    from .gsf_functions import SLMO_model, SLO_model, UB_model
+    from .ensemble_prior import EnsemblePrior
