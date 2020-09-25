@@ -1,5 +1,5 @@
 import numpy as np
-from numba import jit, prange
+#from numba import jit, prange
 from numpy import ndarray
 from scipy import stats
 from typing import Optional, Tuple, Any, Union, Callable, Dict, List, Sequence
@@ -24,7 +24,6 @@ class EnsemblePrior:
         self.nld_param, self.gsf_param = nld_param, gsf_param
         self.N, self.N_nld_par, self.N_gsf_par = N, N_nld_par, N_gsf_par
 
-
     def __call__(self, param):
         """
         """
@@ -33,7 +32,7 @@ class EnsemblePrior:
     def prior(self, cube, ndim, nparam):
         """
         """
-        return self.evaluate(param)
+        set_par(cube, self.evaluate(cube))
 
     def evaluate(self, param):
         """
@@ -46,20 +45,25 @@ class EnsemblePrior:
         pars[3*N:3*N+Nnld] = self.nld_param(pars[3*N:3*N+Nnld])
         pars[3*N+Nnld:3*N+Nnld+Ngsf] =\
             self.gsf_param(pars[3*N+Nnld:3*N+Nnld+Ngsf])
-        set_par(param, pars)
+        return pars
 
 
-def uniform(x: Union[float, ndarray], lower: Union[float, ndarray],
-            upper: Union[float, ndarray]) -> Union[float, ndarray]:
+def uniform(x: Union[float, ndarray], lower: Union[float, ndarray] = 0,
+            upper: Union[float, ndarray] = 1) -> Union[float, ndarray]:
     """ Transforms a random number from a uniform PDF between
     0 and 1 to a uniform distribution between lower and upper.
     """
     return x*(upper-lower) + lower
 
 
-def normal(x:  Union[float, ndarray], loc: Union[float, ndarray],
-           scale: Union[float, ndarray]) -> Union[float, ndarray]:
+def normal(x:  Union[float, ndarray], loc: Union[float, ndarray] = 0.,
+           scale: Union[float, ndarray] = 1.) -> Union[float, ndarray]:
     return stats.norm.ppf(x, loc=loc, scale=scale)
+
+
+def exponential(x: Union[float, ndarray],
+                scale: Union[float, ndarray] = 1.0) -> Union[float, ndarray]:
+    return -np.log(1-x)*scale
 
 
 def truncnorm(x: Union[float, ndarray], lower: Union[float, ndarray],
@@ -72,7 +76,6 @@ def truncnorm(x: Union[float, ndarray], lower: Union[float, ndarray],
     return stats.truncnorm.ppf(x, a, b, loc, scale)
 
 
-@jit
 def set_par(cube, values):
     for i, value in enumerate(values):
         cube[i] = value

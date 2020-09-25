@@ -14,7 +14,7 @@ from pathlib import Path
 from inspect import signature
 
 import pandas as pd
-from scipy import stats
+from scipy.interpolate import interp1d
 from .vector import Vector
 from .library import self_if_none
 from .spinfunctions import SpinFunctions
@@ -23,7 +23,8 @@ from .models import ResultsNormalized, NormalizationParameters
 from .abstract_normalizer import AbstractNormalizer
 from .extractor import Extractor
 from .ensemble_likelihood import EnsembleLikelihood
-from .ensemble_prior import EnsemblePrior, uniform, normal, truncnorm
+from .ensemble_prior import (EnsemblePrior, uniform,
+                             normal, truncnorm, exponential)
 
 TupleDict = Dict[str, Tuple[float, float]]
 
@@ -42,7 +43,7 @@ class NormalizerSim(AbstractNormalizer):
                  path: Optional[Union[str, Path]] = 'saved_run/normalizers',
                  regenerate: bool = False,
                  nld_model: str = 'CT',
-                 gsf_model: Optional[str] = None,
+                 gsf_model: str = 'SM',
                  norm_pars: NormalizationParameters) -> None:
         """ Init docstring
         """
@@ -77,6 +78,11 @@ class NormalizerSim(AbstractNormalizer):
         self.discrete = discrete
         self.shell_model = shell_model
 
+        self.ub_gen = interp1d(self.shell_model.E,
+                               self.shell_model.values,
+                               kind='linear', bounds_error=False,
+                               fill_value=(0, 0))
+
         if nld_model.upper() == 'CT':
             self.nld_model = self.const_temperature
             self.nld_prior = lambda x: uniform(x, np.array([0., -10.]),
@@ -91,8 +97,22 @@ class NormalizerSim(AbstractNormalizer):
             raise NotImplementedError("NLD model '%s' has not yet been \
                 implemented." % nld_model)
 
-        self.gsf_model = lambda x, renorm: None
-        self.gsf_prior = lambda x: uniform(x, 1.0, 2.0)
+        if gsf_model.upper() == 'SM':
+            self.gsf_model = lambda x, renorm: None
+            #self.gsf_prior = lambda x: uniform(x, 1.0, 2.0)
+            self.gsf_prior = lambda x: truncnorm(x, 1.0, np.inf, 1.5, 10.)
+        elif gsf_model.upper() == 'SM+SMLO':
+            try:
+                self.setup_slmo_prior(norm_pars)
+                self.gsf_model = self.slmo_gsf_model
+                self.gsf_prior = self.slmo_prior
+            except KeyError:
+                print("SLMO priors not found, falling back on SM only.")
+                self.gsf_model = lambda x, renorm: None
+                self.gsf_prior = lambda x: uniform(x, 1.0, 2.0)
+        else:
+            raise NotImplementedError("GSF model '%s' has not yet been \
+                implemented." % gsf_model)
 
         self.multinest_path = Path('multinest')
         self.multinest_kwargs: dict = {"seed": 65498, "resume": False}
@@ -171,37 +191,17 @@ class NormalizerSim(AbstractNormalizer):
                                  gsf_limit_low, gsf_limit_high, discrete,
                                  shell_model, self.nld_model, self.gsf_model)
 
-        bounds  = [[0, 10] for i in range(N)]
-        bounds += [[0, 10] for i in range(N)]
-        bounds += [[-10, 10] for i in range(N)]
-        bounds += [[0., 5.], [-5., 5.], [1.0, 1.0]]
-
-        def neglnlike(*args, **kwargs):
-            return -lnl(*args, **kwargs)
-        res = differential_evolution(neglnlike, bounds=bounds)
-
-        # We use the results in res to preliminary normalize the NLD and GSF
-        # to ensure that the true value is somewhere around 1 for A and B
-        # and 0 for alpha.
-        """for nld, (A, alpha) in zip(nlds, zip(res.x[0:N], res.x[2*N:3*N])):
-            nld.transform(A, alpha, inplace=True)
-        for gsf, (B, alpha) in zip(gsfs, zip(res.x[N:2*N], res.x[2*N:3*N])):
-            gsf.transform(B, alpha, inplace=True)"""
-
-        # Recreate to make sure only updated NLDs and GSFs.
-        lnl = EnsembleLikelihood(nlds, gsfs, nld_limit_low, nld_limit_high,
-                                 gsf_limit_low, gsf_limit_high, discrete,
-                                 shell_model, self.nld_model, self.gsf_model)
-
         def const_prior(x):
-            return truncnorm(x, 0, np.inf, 1., 10.)
-            # return 10**uniform(x, -3, 3)
+            #return normal(x, 1., 10.)
+            #return truncnorm(x, 0, np.inf, 1., 10.)
+            return 10**uniform(x, -3, 3)
+            #return 10**normal(x, 0, 1.)
 
         prp = EnsemblePrior(A=const_prior,
                             B=const_prior,
                             alpha=lambda x: uniform(x, -10, 10),
                             nld_param=self.nld_prior, gsf_param=self.gsf_prior,
-                            N=N, N_nld_par=2, N_gsf_par=1)
+                            N=N, N_nld_par=N_nld_par, N_gsf_par=N_gsf_par)
 
         names = ['A[%d]' % i for i in range(N)]
         names += ['B[%d]' % i for i in range(N)]
@@ -212,19 +212,8 @@ class NormalizerSim(AbstractNormalizer):
             prp(cube)
 
         def loglike(cube, ndim, nparams):
-            return lnl(cube)
+            return lnl(prp(cube))
 
-        try:
-            priors = list(np.random.rand(len(transforms)))
-            prior(priors, None, None)
-            lnl.evaluate_debug(priors)
-            lnl.evaluate_debug([1.6, 1., 1.02, 0.9, 0.29, 1.5])
-            lnl.evaluate_debug([0.6, 40., 1.02, 0.9, 0.29, 1.5])
-            lnl.evaluate_debug([0.9, 40., 1.02, 1.46, 0.29, 1.5])
-            lnl.evaluate_debug([0.9, 100., 1.02, 1.46, 0.29, 1.5])
-            lnl.evaluate_debug([1.6, 200., 1.02, 0.9, 0.29, 1.5])
-        except:
-            pass
 
         self.multinest_path.mkdir(exist_ok=True)
         path = self.multinest_path / f"norm_"
@@ -237,7 +226,7 @@ class NormalizerSim(AbstractNormalizer):
                                       else None)
 
         with redirect_stdout(self.LOG):
-            pymultinest.run(loglike, prior, Nvars,
+            pymultinest.run(lnl.loglike, prp.prior, Nvars,
                             outputfiles_basename=str(path),
                             **self.multinest_kwargs)
 
@@ -264,6 +253,22 @@ class NormalizerSim(AbstractNormalizer):
 
         return popt, samples
 
+    def slmo_gsf_model(self, E: ndarray,
+                       slmo_mean: float,
+                       slmo_width: Tuple[float, float],
+                       slmo_size: float,
+                       sf_mean: float,
+                       sf_width: float,
+                       sf_size: float,
+                       renorm: float) -> ndarray:
+        """ Calculate the GSF model we have choosen.
+        """
+        slmo_width, T = slmo_width
+        gsf = self.SLMO(E, slmo_mean, slmo_width, slmo_size, T)
+        gsf += self.SLO(E, sf_mean, sf_width, sf_size)
+        gsf += self.UB_model(E, renorm)
+        return gsf
+
     @staticmethod
     def const_temperature(E: ndarray, T: float, Eshift: float) -> ndarray:
         """ Constant Temperature NLD"""
@@ -280,9 +285,60 @@ class NormalizerSim(AbstractNormalizer):
         sigma = 0.0146*A**(5./3.)
         sigma = np.sqrt((1 + np.sqrt(1 + 4*a*(E-Eshift)))*sigma/(2*a))
 
-        bsfg = np.exp(2*np.sqrt(1 + 4*a*(E-Eshift)))
+        bsfg = np.exp(2*np.sqrt(a*(E-Eshift)))
         bsfg /= (12.*np.sqrt(2)*sigma*a**(1./4.)*(E-Eshift)**(5./4.))
         return bsfg
+
+    @staticmethod
+    def SLMO(E: ndarray, mean: float, width: float,
+             size: float, T: float) -> ndarray:
+        """ The SLMO model for the gSF"""
+
+        width_ = width*(E/mean + (2*np.pi*T/mean)**2)
+        slmo = 8.6737e-8*size/(1-np.exp(-E/T))
+        slmo *= (2./np.pi)*E*width_
+        slmo /= ((E**2 - mean**2)**2 + (E*width_)**2)
+        return slmo
+
+    @staticmethod
+    def SLO(E: ndarray, mean: float, width: float, size: float) -> ndarray:
+        """ The common SLO """
+
+        slo = 8.6737e-8*size*E*width**2
+        slo /= ((E**2 - mean**2)**2 + (E*width)**2)
+        return slo
+
+    def UB_model(self, E: ndarray, renorm: float) -> ndarray:
+        """ Model of the upbend. In this case we expect
+        an object that returns the value of the upbend at energy E.
+        """
+        return renorm*self.ub_gen(E)
+
+    def setup_slmo_prior(self, norm_pars):
+        """
+        """
+        # In the following
+        self.gsf_means = np.array([norm_pars.GSFmodelPars['GDR']['E'],
+                                   norm_pars.GSFmodelPars['GDR']['G'],
+                                   norm_pars.GSFmodelPars['GDR']['S'],
+                                   norm_pars.GSFmodelPars['SF']['E'],
+                                   norm_pars.GSFmodelPars['SF']['G'],
+                                   norm_pars.GSFmodelPars['SF']['S']])
+
+        self.gsf_sigmas = np.array([norm_pars.GSFmodelPars['GDR']['E_err'],
+                                   norm_pars.GSFmodelPars['GDR']['G_err'],
+                                   norm_pars.GSFmodelPars['GDR']['S_err'],
+                                   norm_pars.GSFmodelPars['SF']['E_err'],
+                                   norm_pars.GSFmodelPars['SF']['G_err'],
+                                   norm_pars.GSFmodelPars['SF']['S_err']])
+
+    def slmo_prior(self, x: ndarray) -> ndarray:
+        """
+        """
+        x[0:6] = normal(x[0:6], self.gsf_means, self.gsf_sigmas)
+        # x[-1] = uniform(x[-1], 1.0, 2.0)
+        x[-1] = truncnorm(x[-1], 1.0, np.inf, 1.5, 0.5)
+        return x
 
     @property
     def discrete(self) -> Optional[Vector]:

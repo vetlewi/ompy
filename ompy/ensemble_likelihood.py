@@ -5,6 +5,8 @@ from inspect import signature
 from typing import Optional, Tuple, Any, Union, Callable, Dict, List
 
 from .vector import Vector
+from .models import (ExtrapolationModelLow, ExtrapolationModelHigh,
+                     NormalizationParameters)
 
 
 class EnsembleLikelihood:
@@ -19,7 +21,9 @@ class EnsembleLikelihood:
                  gsf_limit_high: Tuple[float, float],
                  nld_ref: Vector, gsf_ref: Vector,
                  nld_model: Callable[..., ndarray],
-                 gsf_model: Callable[..., ndarray]) -> None:
+                 gsf_model: Callable[..., ndarray],
+                 spc_model: Optional[Callable[..., ndarray]] = None,
+                 norm_pars: Optional[NormalizationParameters] = None) -> None:
         """ Setup parameters for the log likelihood.
 
         Args:
@@ -62,6 +66,8 @@ class EnsembleLikelihood:
 
         self.nld_E, self.nld = as_array(nlds)
         self.gsf_E, self.gsf = as_array(gsfs)
+        self.nld_idx = make_idx(self.nld)
+        self.gsf_idx = make_idx(self.gsf)
 
         self.N, self.M = self.nld.shape
 
@@ -70,6 +76,10 @@ class EnsembleLikelihood:
         self.nld_idx_low = make_idx(self.nld_low)
         self.gsf_idx_low = make_idx(self.gsf_low)
 
+        self.nld_E_cum, self.nld_cum = as_array(nlds, (0, nld_limit_high[1]))
+        self.nld_idx_cum = make_idx(self.nld_cum)
+        self.dx = np.diff(nlds[0].E)[0]
+
         self.nld_E_high, self.nld_high = as_array(nlds, nld_limit_high)
         self.gsf_E_high, self.gsf_high = as_array(gsfs, gsf_limit_high)
         self.nld_idx_high = make_idx(self.nld_high)
@@ -77,7 +87,10 @@ class EnsembleLikelihood:
 
         self.nld_ref = nld_ref.copy()
         nld_low_ref = nld_ref.cut(*nld_limit_low, inplace=False)
+        nld_cum_ref = nld_ref.cut(0, nld_limit_high[1], inplace=False)
         self.nld_low_ref = np.tile(nld_low_ref.values, (self.N, 1))
+        self.nld_cum_ref = np.tile(np.cumsum(nld_cum_ref.values), (self.N, 1))
+        self.nld_cum_ref *= np.diff(nld_ref.E)[0]
 
         self.gsf_ref = gsf_ref.copy()
         gsf_low_ref = gsf_ref.cut(*gsf_limit_low, inplace=False)
@@ -85,9 +98,27 @@ class EnsembleLikelihood:
 
         self.nld_model = nld_model
         self.gsf_model = gsf_model
+        self.spc_model = None
+
+        if norm_pars is not None:
+            self.norm_pars = norm_pars
+            gsfs_extrapolated = self.extrapolate(gsfs, gsf_limit_low,
+                                                 gsf_limit_high,
+                                                 norm_pars.Sn[0])
+            self.gsf_E_ext, self.gsf_ext = as_array(gsfs_extrapolated)
+            self.gsf_idx_ext = make_idx(self.gsf_ext)
+            self.nld_extr_E = np.arange(max(nlds[0].E)+np.diff(nlds[0].E)[0],
+                                        norm_pars.Sn[0], np.diff(nlds[0].E)[0])
+            self.nld_extr_E_all = np.concatenate((nlds[0].E, self.nld_extr_E))
+            self.nld_extr_E = np.tile(self.nld_extr_E, (self.N, 1))
+            self.nld_extr_E_all = np.tile(self.nld_extr_E_all, (self.N, 1))
 
         self.N_nld_par = len(signature(self.nld_model).parameters)-1
         self.N_gsf_par = len(signature(self.gsf_model).parameters)-1
+        self.N_spc_par = 0
+        if spc_model is not None:
+            self.spc_model = None
+            self.N_spc_par = len(signature(self.spc_model).parameters)-1
 
     def __call__(self, param: Tuple[float]) -> float:
         return self.evaluate(param)
@@ -102,21 +133,34 @@ class EnsembleLikelihood:
         """ Evaluate the likelihood.
         """
         N, Nnld, Ngsf = self.N, self.N_nld_par, self.N_gsf_par
-
         A, B, alpha = param[0:N], param[N:2*N], param[2*N:3*N]
         nld_param = param[3*N:3*N+Nnld]
         gsf_param = param[3*N+Nnld:3*N+Nnld+Ngsf]
+        renorm = 0
+        gsf_param_ = gsf_param
+        if Ngsf > 1:
+            gsf_param_ = [gsf_param[0], (gsf_param[1], nld_param[0]),
+                          gsf_param[2], gsf_param[3], gsf_param[4],
+                          gsf_param[5], gsf_param[6]]
+            renorm = gsf_param[-1]
+        else:
+            renorm = gsf_param
 
         A, B, alpha, T, Eshift, sm_shift = self.unpack_param(param)
 
         nld_error_low = self.nld_error_low(A, alpha)
-        gsf_error_low = self.gsf_error_low(B, alpha, gsf_param)
+        #gsf_error_low = self.gsf_error_low(B, alpha, renorm)
 
         nld_error_high = self.nld_error_high(A, alpha, nld_param)
-        gsf_error_high = self.gsf_error_high(B, alpha, gsf_param)
+        #gsf_error_high = self.gsf_error_high(B, alpha, gsf_param_)
 
-        return -0.5*(nld_error_low + gsf_error_low +
-                     nld_error_high + gsf_error_high)
+        nld_error_cum = self.nld_error_cum(A, alpha)
+
+        #print(gsf_error_low, " ", gsf_error_high)
+
+
+        return -0.5*(nld_error_low + nld_error_cum + nld_error_high
+                     )# gsf_error_low + gsf_error_high)
 
     def nld_error_low(self, A: ndarray, alpha: ndarray) -> float:
         """
@@ -124,7 +168,16 @@ class EnsembleLikelihood:
         exp = self.nld_low*self.evaluate_norm_lin(self.nld_E_low,
                                                   self.nld_idx_low,
                                                   A, alpha)
-        return self.error(exp, self.nld_low_ref)
+        return self.error(exp, self.nld_low_ref, 0.3)
+
+    def nld_error_cum(self, A: ndarray, alpha: ndarray) -> float:
+        """
+        """
+        exp = self.nld_cum*self.evaluate_norm_lin(self.nld_E_cum,
+                                                  self.nld_idx_cum,
+                                                  A, alpha)
+        exp = np.cumsum(exp, axis=1)*self.dx
+        return self.error(exp, self.nld_cum_ref, 0.3)
 
     def gsf_error_low(self, B: ndarray, alpha: ndarray,
                       renorm: float = 1.0) -> float:
@@ -133,7 +186,7 @@ class EnsembleLikelihood:
         exp = self.gsf_low*self.evaluate_norm_lin(self.gsf_E_low,
                                                   self.gsf_idx_low,
                                                   B, alpha)
-        return self.error(exp, self.gsf_low_ref*renorm)
+        return self.error(exp, self.gsf_low_ref*renorm, 0.3)
 
     def nld_error_high(self, A: ndarray, alpha: ndarray,
                        nld_par: any) -> float:
@@ -148,12 +201,74 @@ class EnsembleLikelihood:
                        gsf_par: any) -> float:
         """
         """
-        # Not yet implemented. Will only return 0s
-        return 0
+        if self.N_gsf_par == 1:
+            return 0
         exp = self.gsf_high*self.evaluate_norm_lin(self.gsf_E_high,
                                                    self.gsf_idx_high,
                                                    B, alpha)
-        return self.error(exp, self.nld_model(self.gsf_E_high, *gsf_par))
+        return self.error(exp, self.gsf_model(self.gsf_E_high, *gsf_par))
+
+    def Gg_error(self, A: ndarray, B: ndarray, alpha: ndarray,
+                 nld_par: any, spc_par: any) -> float:
+        """
+        """
+
+        # Normalize the gsf
+        gsf = self.gsf_ext*self.evaluate_norm_lin(self.gsf_E_ext,
+                                                  self.gsf_idx_ext,
+                                                  B, alpha)
+
+        # Normalize the NLD
+        nld = self.nld*self.evaluate_norm_lin(self.nld_E,
+                                              self.nld_idx,
+                                              A, alpha)
+
+        # Calculate the model density
+        nld_model = self.nld_model(self.nld_extr_E, *nld_par)
+        nld = np.concatenate((nld, nld_model), axis=1)
+        nld *= self.spc_model(self.nld_extr_E_all, *spc_par)
+        nld = np.flip(nld, axis=1)
+
+        # Perform the actual integration
+        Gg0 = np.sum(nld*gsf, axis=1)  # Unitless
+        Gg0 *= self.D0_from_model(nld_par, spc_par)/2  # <Gg0> in eV
+
+        return np.sum(np.log(self.Gg_dist(Gg0)))
+
+    def D0_from_model(self, nld_par: any, spc_par: any) -> float:
+        """ Calculate the D0 parameter in [meV]
+        """
+
+        rhoSn = self.nld_model(self.norm_pars.Sn[0], *nld_par)
+        spin_part = self.spc_model(self.norm_pars.Sn[0], *spc_par)
+        return 1e9/(rhoSn*spin_part)
+
+    @staticmethod
+    def extrapolate(gsfs, gsf_limit_low, gsf_limit_high, Sn) -> List[Vector]:
+
+        extr_low = ExtrapolationModelLow('low')
+        extr_high = ExtrapolationModelHigh('high')
+
+        extr_low.Efit = gsf_limit_low
+        extr_high.Efit = gsf_limit_high
+
+        de = np.diff(gsfs[0].E)[0]
+        e_low = np.arange(0, np.min(gsfs[0].E), de)
+        e_high = np.arange(np.max(gsfs[0].E)+de, Sn, de)
+
+        e_all = np.concatenate((e_low, gsfs[0].E, e_high))
+
+        extr_gsfs = []
+        for gsf in gsfs:
+            extr_low.fit(gsf)
+            extr_high.fit(gsf)
+
+            low_val = extr_low.extrapolate(scaled=False, E=e_low).values
+            high_val = extr_high.extrapolate(scaled=False, E=e_high).values
+            values = np.concatenate((low_val, gsf.values, high_val))
+
+            extr_gsfs.append(om.Vector(E=e_all, values=values, units='MeV'))
+        return extr_gsfs
 
     @staticmethod
     def error(data: ndarray, model: ndarray,
