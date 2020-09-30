@@ -3,8 +3,10 @@ import numba as nb
 from numpy import ndarray
 from inspect import signature
 from typing import Optional, Tuple, Any, Union, Callable, Dict, List
+import scipy.stats as stats
 
 from .vector import Vector
+from .library import log_interp1d
 from .models import (ExtrapolationModelLow, ExtrapolationModelHigh,
                      NormalizationParameters)
 
@@ -53,6 +55,8 @@ class EnsembleLikelihood:
         assert len(nlds) == len(gsfs),\
             "Must have the same number of NLDs as GSFs."
 
+        cum_lim = 4.0
+
         def as_array(vecs, cut=None):
             if cut is not None:
                 vecs = [vec.cut(*cut, inplace=False) for vec in vecs]
@@ -70,13 +74,14 @@ class EnsembleLikelihood:
         self.gsf_idx = make_idx(self.gsf)
 
         self.N, self.M = self.nld.shape
+        self.bin_size = np.diff(nlds[0].E)[0]
 
         self.nld_E_low, self.nld_low = as_array(nlds, nld_limit_low)
         self.gsf_E_low, self.gsf_low = as_array(gsfs, gsf_limit_low)
         self.nld_idx_low = make_idx(self.nld_low)
         self.gsf_idx_low = make_idx(self.gsf_low)
 
-        self.nld_E_cum, self.nld_cum = as_array(nlds, (0, nld_limit_high[1]))
+        self.nld_E_cum, self.nld_cum = as_array(nlds, (0, cum_lim))
         self.nld_idx_cum = make_idx(self.nld_cum)
         self.dx = np.diff(nlds[0].E)[0]
 
@@ -87,7 +92,7 @@ class EnsembleLikelihood:
 
         self.nld_ref = nld_ref.copy()
         nld_low_ref = nld_ref.cut(*nld_limit_low, inplace=False)
-        nld_cum_ref = nld_ref.cut(0, nld_limit_high[1], inplace=False)
+        nld_cum_ref = nld_ref.cut(0, cum_lim, inplace=False)
         self.nld_low_ref = np.tile(nld_low_ref.values, (self.N, 1))
         self.nld_cum_ref = np.tile(np.cumsum(nld_cum_ref.values), (self.N, 1))
         self.nld_cum_ref *= np.diff(nld_ref.E)[0]
@@ -98,27 +103,39 @@ class EnsembleLikelihood:
 
         self.nld_model = nld_model
         self.gsf_model = gsf_model
-        self.spc_model = None
-
-        if norm_pars is not None:
-            self.norm_pars = norm_pars
-            gsfs_extrapolated = self.extrapolate(gsfs, gsf_limit_low,
-                                                 gsf_limit_high,
-                                                 norm_pars.Sn[0])
-            self.gsf_E_ext, self.gsf_ext = as_array(gsfs_extrapolated)
-            self.gsf_idx_ext = make_idx(self.gsf_ext)
-            self.nld_extr_E = np.arange(max(nlds[0].E)+np.diff(nlds[0].E)[0],
-                                        norm_pars.Sn[0], np.diff(nlds[0].E)[0])
-            self.nld_extr_E_all = np.concatenate((nlds[0].E, self.nld_extr_E))
-            self.nld_extr_E = np.tile(self.nld_extr_E, (self.N, 1))
-            self.nld_extr_E_all = np.tile(self.nld_extr_E_all, (self.N, 1))
+        self.spc_model = spc_model
 
         self.N_nld_par = len(signature(self.nld_model).parameters)-1
         self.N_gsf_par = len(signature(self.gsf_model).parameters)-1
-        self.N_spc_par = 0
-        if spc_model is not None:
-            self.spc_model = None
-            self.N_spc_par = len(signature(self.spc_model).parameters)-1
+        self.N_spc_par = len(signature(self.spc_model).parameters)-1
+
+        self.norm_pars = norm_pars if norm_pars is not None else None
+
+        self.Gg0_dist = lambda x: np.sum(((self.norm_pars.Gg[0]-x)/self.norm_pars.Gg[1])**2)
+
+        # Or
+        # self.Gg0_dist = lambda x: self.truncnorm(x, 5, np.inf, 25., 250.)
+
+        if norm_pars is not None:
+            self.Sn = norm_pars.Sn[0]
+            self.integrateE = np.linspace(0, norm_pars.Sn[0], 1001)
+            gsfs_extrapolated = self.extrapolate(gsfs, gsf_limit_low,
+                                                 gsf_limit_high,
+                                                 self.Sn,
+                                                 self.integrateE)
+
+            self.gsf_E_ext, self.gsf_ext = as_array(gsfs_extrapolated)
+            self.gsf_idx_ext = make_idx(self.gsf_ext)
+
+            self.nld_extr_E = np.arange(max(nlds[0].E)+np.diff(nlds[0].E)[0],
+                                        self.Sn+np.diff(nlds[0].E)[0],
+                                        np.diff(nlds[0].E)[0])
+
+            self.nld_extr_E_all = np.concatenate((nlds[0].E, self.nld_extr_E))
+            self.nld_extr_E = np.tile(self.nld_extr_E, (self.N, 1))
+            self.integrateE_MG = np.tile(self.integrateE, (self.N, 1))
+            self.nld_int_E = np.tile(np.linspace(0, norm_pars.Sn[0], 1001),
+                                     (self.N, 1))
 
     def __call__(self, param: Tuple[float]) -> float:
         return self.evaluate(param)
@@ -132,13 +149,17 @@ class EnsembleLikelihood:
     def evaluate(self, param: Tuple[float]) -> float:
         """ Evaluate the likelihood.
         """
-        N, Nnld, Ngsf = self.N, self.N_nld_par, self.N_gsf_par
+        N = self.N
+        Nnld, Ngsf, Nspc = self.N_nld_par, self.N_gsf_par, self.N_spc_par
         A, B, alpha = param[0:N], param[N:2*N], param[2*N:3*N]
         nld_param = param[3*N:3*N+Nnld]
         gsf_param = param[3*N+Nnld:3*N+Nnld+Ngsf]
+        spc_param = param[3*N+Nnld+Ngsf:3*N+Nnld+Ngsf+Nspc]
         renorm = 0
         gsf_param_ = gsf_param
-        if Ngsf > 1:
+        if Ngsf == 2:
+            gsf_param_ = gsf_param
+        elif Ngsf > 1:
             gsf_param_ = [gsf_param[0], (gsf_param[1], nld_param[0]),
                           gsf_param[2], gsf_param[3], gsf_param[4],
                           gsf_param[5], gsf_param[6]]
@@ -152,15 +173,21 @@ class EnsembleLikelihood:
         #gsf_error_low = self.gsf_error_low(B, alpha, renorm)
 
         nld_error_high = self.nld_error_high(A, alpha, nld_param)
-        #gsf_error_high = self.gsf_error_high(B, alpha, gsf_param_)
+        gsf_error_high = self.gsf_error_high(B, alpha, gsf_param_)
 
         nld_error_cum = self.nld_error_cum(A, alpha)
 
         #print(gsf_error_low, " ", gsf_error_high)
 
+        #Gg0_error = self.Gg_error(A, B, alpha, nld_param, spc_param)
 
-        return -0.5*(nld_error_low + nld_error_cum + nld_error_high
-                     )# gsf_error_low + gsf_error_high)
+        logp = -0.5*(nld_error_low + nld_error_cum + nld_error_high
+                     + gsf_error_high)
+
+        if logp != logp:
+            return -np.inf
+
+        return logp
 
     def nld_error_low(self, A: ndarray, alpha: ndarray) -> float:
         """
@@ -206,7 +233,7 @@ class EnsembleLikelihood:
         exp = self.gsf_high*self.evaluate_norm_lin(self.gsf_E_high,
                                                    self.gsf_idx_high,
                                                    B, alpha)
-        return self.error(exp, self.gsf_model(self.gsf_E_high, *gsf_par))
+        return self.error(exp, self.gsf_model(self.gsf_E_high, *gsf_par), 0.5)
 
     def Gg_error(self, A: ndarray, B: ndarray, alpha: ndarray,
                  nld_par: any, spc_par: any) -> float:
@@ -226,14 +253,20 @@ class EnsembleLikelihood:
         # Calculate the model density
         nld_model = self.nld_model(self.nld_extr_E, *nld_par)
         nld = np.concatenate((nld, nld_model), axis=1)
-        nld *= self.spc_model(self.nld_extr_E_all, *spc_par)
-        nld = np.flip(nld, axis=1)
+        interp = log_interp1d(self.nld_extr_E_all, nld, axis=1,
+                              bounds_error=False,
+                              fill_value=(-np.inf, -np.inf))
+
+        nld = interp(self.Sn - self.integrateE)
+        nld *= self.spc_model(np.tile(self.Sn - self.integrateE, (self.N, 1)),
+                              *spc_par)
 
         # Perform the actual integration
-        Gg0 = np.sum(nld*gsf, axis=1)  # Unitless
-        Gg0 *= self.D0_from_model(nld_par, spc_par)/2  # <Gg0> in eV
+        Gg0 = np.sum(nld*gsf, axis=1)*np.diff(self.integrateE)[0]  # Unitless
+        Gg0 *= self.D0_from_model(nld_par, spc_par)/2  # <Gg0> in meV
 
-        return np.sum(np.log(self.Gg_dist(Gg0)))
+        return np.sum(((self.norm_pars.Gg[0]-Gg0)/self.norm_pars.Gg[1])**2)
+        #return self.Gg0_dist(Gg0)
 
     def D0_from_model(self, nld_par: any, spc_par: any) -> float:
         """ Calculate the D0 parameter in [meV]
@@ -243,8 +276,17 @@ class EnsembleLikelihood:
         spin_part = self.spc_model(self.norm_pars.Sn[0], *spc_par)
         return 1e9/(rhoSn*spin_part)
 
+    def truncnorm(self, x, a, b, loc, scale):
+        a = (a-loc)/scale
+        b = (b-loc)/scale
+        logp = stats.truncnorm.logpdf(x, a, b, loc, scale)
+        if logp != logp:
+            return -np.inf
+        return logp
+
     @staticmethod
-    def extrapolate(gsfs, gsf_limit_low, gsf_limit_high, Sn) -> List[Vector]:
+    def extrapolate(gsfs, gsf_limit_low, gsf_limit_high, Sn,
+                    grid) -> List[Vector]:
 
         extr_low = ExtrapolationModelLow('low')
         extr_high = ExtrapolationModelHigh('high')
@@ -254,7 +296,7 @@ class EnsembleLikelihood:
 
         de = np.diff(gsfs[0].E)[0]
         e_low = np.arange(0, np.min(gsfs[0].E), de)
-        e_high = np.arange(np.max(gsfs[0].E)+de, Sn, de)
+        e_high = np.arange(np.max(gsfs[0].E)+de, Sn+de, de)
 
         e_all = np.concatenate((e_low, gsfs[0].E, e_high))
 
@@ -267,7 +309,12 @@ class EnsembleLikelihood:
             high_val = extr_high.extrapolate(scaled=False, E=e_high).values
             values = np.concatenate((low_val, gsf.values, high_val))
 
-            extr_gsfs.append(om.Vector(E=e_all, values=values, units='MeV'))
+            # Interpolation with grid.
+            gsf_intrp = log_interp1d(e_all, values, bounds_error=False,
+                                     fill_value=(-np.inf, -np.inf))
+
+            extr_gsfs.append(Vector(E=grid, values=gsf_intrp(grid),
+                                    units='MeV'))
         return extr_gsfs
 
     @staticmethod

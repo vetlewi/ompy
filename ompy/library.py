@@ -428,3 +428,56 @@ def _retrieve_name(var: Any) -> str:
     assert match is not None, "Retrieving of name failed"
     name = match.group(1)
     return name
+
+
+def SpinDist(E, J, Sigma_func, args):
+    sigma = Sigma_func(E, *args)
+    return (2*J + 1)*np.exp(-(J+0.5)**2/(2*sigma**2))/(2*sigma**2)
+
+
+def WriteRho(RhoFunction, Spin_model, Spin_args, outfile_base):
+    dU = 0.25
+    U = [0.25]
+    while (U[-1] < 5.0):
+        U.append(U[-1] + dU)
+    dU = 0.5
+    while (U[-1] < 10.0):
+        U.append(U[-1] + dU)
+    dU = 1.0
+    while (U[-1] < 20.0):
+        U.append(U[-1] + dU)
+    U.append(22.5)
+    U.append(25.0)
+    U.append(30.0)
+    U.append(40.0)
+    U.append(50.0)
+    U.append(60.0)
+    U = np.array(U)
+
+    out_bot_name = outfile_base + ".txt"
+    NLD_cum = 0
+
+    outfile_bot = open(out_bot_name, "w")
+
+    for i in range(len(U)):
+        rho_obs = RhoFunction(U[i])
+        try:
+            NLD_cum += rho_obs*(U[i]-U[i-1])
+        except:
+            NLD_cum += rho_obs*0.25
+
+        rho_tot = 0
+        for j in range(30):
+            rho_tot += (2*(j+0.5) + 1)*SpinDist(U[i], j+0.5, Spin_model,
+                                                Spin_args)
+        rho_tot *= rho_obs
+        drho = (np.log(RhoFunction(U[i]+1e-3)/RhoFunction(U[i]-1e-3))/2e-3)
+        line_bot = "%7.2f %6.3f %9.2E %8.2E %8.2E " % (U[i], 1/drho, NLD_cum,
+                                                       rho_obs, rho_tot)
+        for j in range(30):
+            line_bot += "%8.2E " % (rho_obs*SpinDist(U[i], j+0.5, Spin_model,
+                                                     Spin_args))
+        line_bot += "\n"
+        outfile_bot.write(line_bot)
+    outfile_bot.close()
+    return

@@ -572,6 +572,55 @@ class Ensemble:
             raise NotImplementedError(f"State {state} is not a known state")
         return matrix
 
+    def plot_mean(self, *, ax: Any = None,
+                  vmin: Optional[float] = None,
+                  vmax: Optional[float] = None,
+                  add_cbar: bool = True,
+                  scale_by: str = 'all',
+                  **kwargs) -> Tuple[Any, ndarray]:
+        """ Plot the mean of each matrix.
+        """
+
+        if ax is not None:
+            if len(ax) < 3:
+                raise ValueError("Three axes must be provided")
+            fig = ax.figure
+        else:
+            fig, ax = plt.subplots(ncols=3, sharey=True,
+                                   constrained_layout=True)
+
+        # For now, we select the first... later we will do mean
+        raw = Matrix(Ex=self.std_raw.Ex, Eg=self.std_raw.Eg,
+                     values=self.raw_ensemble[0])
+        unf = Matrix(Ex=self.std_unfolded.Ex, Eg=self.std_unfolded.Eg,
+                     values=self.unfolded_ensemble[0])
+        fst = Matrix(Ex=self.std_firstgen.Ex, Eg=self.std_firstgen.Eg,
+                     values=self.firstgen_ensemble[0])
+        raw.plot(ax=ax[0], title='Raw', add_cbar=False, vmin=vmin, vmax=vmax,
+                 **kwargs)
+        unf.plot(ax=ax[1], title='Unfolded', add_cbar=False, vmin=vmin,
+                 vmax=vmax, **kwargs)
+        im, _, _ = fst.plot(ax=ax[2], title='First Generation',
+                            vmin=vmin, vmax=vmax, add_cbar=False, **kwargs)
+        ax[1].set_ylabel(None)
+        ax[2].set_ylabel(None)
+
+        vminset = False
+        vmaxset = False
+
+        # Handle the colorbar
+        if add_cbar:
+            if vminset and vmaxset:
+                fig.colorbar(im, extend='both')
+            elif vminset:
+                fig.colorbar(im, extend='min')
+            elif vmaxset:
+                fig.colorbar(im, extend='max')
+            else:
+                fig.colorbar(im)
+        fig.suptitle("Mean matrices")
+        return fig, ax
+
     def plot(self, *, ax: Any = None,
              vmin: Optional[float] = None,
              vmax: Optional[float] = None,

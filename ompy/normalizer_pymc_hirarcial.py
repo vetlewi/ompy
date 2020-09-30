@@ -22,13 +22,131 @@ from .spinfunctions import SpinFunctions
 from .filehandling import load_discrete
 from .models import ResultsNormalized, NormalizationParameters
 from .abstract_normalizer import AbstractNormalizer
-from .GamGamIntegrator import GamGamIntegrator,SpinDist,GamGamFuctional, GamGam
 from .gsf_functions import SLMO_model, SLO_model, UB_model
 from .extractor import Extractor
 
-def prepare_data(nlds: list[Vector], )
+def prepare_data(nlds: list, gsfs: list,
+                 limit_nld_low: Tuple[float, float], limit_nld_high: Tuple[float, float],
+                 limit_gsf_low: Tuple[float, float], limit_gsf_high: Tuple[float, float],
+                 nld_ref_low: Optional[Vector] = None, nld_ref_high: Optional[Vector] = None,
+                 gsf_ref_low: Optional[Vector] = None, gsf_ref_high: Optional[Vector] = None
+                 ) -> Dict[str, any]:
+    """ Function to prepare an enemble of data to make it ready for fitting.
 
-class NormalizerPYMC(AbstractNormalizer):
+    Args:
+        nlds: A list of NLDs
+        gsfs: A list of GSFs
+        limit_low: Tuple (left_low_limit, right_low_limit) indicating the energy range used to
+            infere the A and alpha parameter later in the analysis.
+        limit_high: Tuple (left_high_limit, right_high_limit) indicating the energy range used to
+            infere the NLD model parameter later in the analysis.
+        limit_gsf: Tuple (left_gsf_limit, right_gsf_limit) indicating the energy range used to
+            infere the B later in the analysis.
+        nld_ref: (Optional, Vector) Reference NLD which we are fitting to.
+        gsf_ref: (Optional, Vector) Reference gSF which we are fitting to.
+    """
+
+    def standardize(v: ndarray) -> ndarray:
+        return (v - v.mean())/v.std()
+
+    def ensure_ndarray(v: dict[str, any]) -> dict[str, any]:
+        r = {}
+        for key in v.keys():
+            if isinstance(v[key], dict):
+                r[key] = ensure_ndarray(v[key])
+            else:
+                try:
+                    r[key] = np.asarray(v[key])
+                except:
+                    print("Could not convert entry '%s' to ndarray. Skipping..." % (key))
+        return r
+
+    def append_entry(data: dict[str, any], values: ndarray,
+                     ref: Optional[ndarray] = None,
+                     func: Optional[Callable[..., any]] = None) -> dict[str, any]:
+        ref_vals = values
+        if ref is not None:
+            ref_vals = ref/ref_vals
+        if func is not None:
+            ref_vals = func(ref_vals)
+        data['values'].append(ref_vals)
+        data['mean'].append(ref_vals.mean())
+        data['std'].append(ref_vals.std())
+        data['standard'].append(standardize(ref_vals))
+        data['normal'].append(values)
+        return data
+
+    def append_vector(data: dict[str, any], vec: Vector,
+                      ref_vec: Optional[Vector] = None,
+                      func: Optional[Callable[..., any]] = None) -> dict[str, any]:
+        ref = None if ref_vec is None else ref_vec.values
+        data['x'] = append_entry(data['x'], vec.E)
+        data['y'] = append_entry(data['y'], vec.values, ref, func)
+        return data
+
+
+    data = {
+            'nld': {
+                'low': {
+                    'x': {'values': [], 'mean': [], 'std': [], 'standard': [], 'normal': []},
+                    'y': {'values': [], 'mean': [], 'std': [], 'standard': [], 'normal': []}
+                },
+                'high': {
+                    'x': {'values': [], 'mean': [], 'std': [], 'standard': [], 'normal': []},
+                    'y': {'values': [], 'mean': [], 'std': [], 'standard': [], 'normal': []}
+                },
+                'all': {
+                    'x': {'values': [], 'mean': [], 'std': [], 'standard': [], 'normal': []},
+                    'y': {'values': [], 'mean': [], 'std': [], 'standard': [], 'normal': []}
+                }
+            },
+            'gsf': {
+                'low': {
+                    'x': {'values': [], 'mean': [], 'std': [], 'standard': [], 'normal': []},
+                    'y': {'values': [], 'mean': [], 'std': [], 'standard': [], 'normal': []}
+                },
+                'high': {
+                    'x': {'values': [], 'mean': [], 'std': [], 'standard': [], 'normal': []},
+                    'y': {'values': [], 'mean': [], 'std': [], 'standard': [], 'normal': []}
+                },
+                'all': {
+                    'x': {'values': [], 'mean': [], 'std': [], 'standard': [], 'normal': []},
+                    'y': {'values': [], 'mean': [], 'std': [], 'standard': [], 'normal': []}
+                }
+            }
+        }
+
+    # Ensure correct limits
+    nld_ref_low = None if nld_ref_low is None else nld_ref_low.cut(*limit_nld_low, inplace=False)
+    nld_ref_high = None if nld_ref_high is None else nld_ref_high.cut(*limit_nld_high, inplace=False)
+
+    gsf_ref_low = None if gsf_ref_low is None else gsf_ref_low.cut(*limit_gsf_low, inplace=False)
+    gsf_ref_high = None if gsf_ref_high is None else gsf_ref_high.cut(*limit_gsf_high, inplace=False)
+
+    for i, (nld, gsf) in enumerate(zip(nlds, gsfs)):
+        nld = nld.copy()
+        gsf = gsf.copy()
+
+        nld.to_MeV()
+        gsf.to_MeV()
+
+        nld_low = nld.cut(*limit_nld_low, inplace=False)
+        nld_high = nld.cut(*limit_nld_high, inplace=False)
+
+        gsf_low = gsf.cut(*limit_gsf_low, inplace=False)
+        gsf_high = gsf.cut(*limit_gsf_high, inplace=False)
+
+        # Set the NLD
+        data['nld']['low'] = append_vector(data['nld']['low'], nld_low, nld_ref_low, func=np.log)
+        data['nld']['high'] = append_data(data['nld']['high'], nld_high, nld_ref_high, func=np.log)
+
+        data['gsf']['low'] = append_vector(data['gsf']['low'], gsf_low, gsf_ref_low, func=np.log)
+        data['gsf']['high'] = append_vector(data['gsf']['high'], gsf_low, gsf_ref_low, func=np.log)
+
+    data = ensure_ndarray(data)
+    return data
+
+class NormalizerPYMC_Hirarcial(AbstractNormalizer):
     """ A re-implementation of the NormalizeNLD class using the
         pyMC3 rather than Multinest. 
     """
@@ -85,7 +203,7 @@ class NormalizerPYMC(AbstractNormalizer):
                   discrete: Optional[Vector] = None,
                   norm_pars: Optional[NormalizationParameters] = None,
                   regenerate: Optional[bool] = None,
-                  E_pred: ndarray = np.linspace(0, 20., 1001)
+                  E_pred: ndarray = np.linspace(0, 20., 1001),
                   **kwargs) -> any:
 
 

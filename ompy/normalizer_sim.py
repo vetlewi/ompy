@@ -16,14 +16,14 @@ from inspect import signature
 import pandas as pd
 from scipy.interpolate import interp1d
 from .vector import Vector
-from .library import self_if_none
+from .library import self_if_none, log_interp1d
 from .spinfunctions import SpinFunctions
 from .filehandling import load_discrete
 from .models import ResultsNormalized, NormalizationParameters
 from .abstract_normalizer import AbstractNormalizer
 from .extractor import Extractor
 from .ensemble_likelihood import EnsembleLikelihood
-from .ensemble_prior import (EnsemblePrior, uniform,
+from .ensemble_prior import (EnsemblePrior, uniform, cnormal,
                              normal, truncnorm, exponential)
 
 TupleDict = Dict[str, Tuple[float, float]]
@@ -44,6 +44,8 @@ class NormalizerSim(AbstractNormalizer):
                  regenerate: bool = False,
                  nld_model: str = 'CT',
                  gsf_model: str = 'SM',
+                 spc_model: bool = False,
+                 gdr_path: Optional[Union[str, pd.DataFrame]] = None,
                  norm_pars: NormalizationParameters) -> None:
         """ Init docstring
         """
@@ -99,8 +101,10 @@ class NormalizerSim(AbstractNormalizer):
 
         if gsf_model.upper() == 'SM':
             self.gsf_model = lambda x, renorm: None
+            #self.gsf_model = lambda x: None
+            #self.gsf_prior = lambda x: None
             #self.gsf_prior = lambda x: uniform(x, 1.0, 2.0)
-            self.gsf_prior = lambda x: truncnorm(x, 1.0, np.inf, 1.5, 10.)
+            self.gsf_prior = lambda x: truncnorm(x, 1.0, np.inf, 1.5, 0.75)
         elif gsf_model.upper() == 'SM+SMLO':
             try:
                 self.setup_slmo_prior(norm_pars)
@@ -110,9 +114,22 @@ class NormalizerSim(AbstractNormalizer):
                 print("SLMO priors not found, falling back on SM only.")
                 self.gsf_model = lambda x, renorm: None
                 self.gsf_prior = lambda x: uniform(x, 1.0, 2.0)
+        elif gsf_model.upper() == 'SM+TABLE':
+            df_qrpa = pd.read_csv(gdr_path) if isinstance(gdr_path, str) \
+                else gdr_path
+            self.QRPA_model = log_interp1d(df_qrpa['Eg'], df_qrpa['gsf'],
+                                           bounds_error=False,
+                                           fill_value=(-np.inf, -np.inf))
+            self.gsf_model = self.qrpa_gsf_model
+            self.gsf_prior = qrpa_prior
         else:
             raise NotImplementedError("GSF model '%s' has not yet been \
                 implemented." % gsf_model)
+
+        self.spc_model = self.GetSpinModel(norm_pars) \
+            if spc_model else lambda x: None
+        self.spc_prior = self.GetSpinPrior(norm_pars) \
+            if spc_model else lambda x: None
 
         self.multinest_path = Path('multinest')
         self.multinest_kwargs: dict = {"seed": 65498, "resume": False}
@@ -134,8 +151,7 @@ class NormalizerSim(AbstractNormalizer):
                   discrete: Optional[Vector] = None,
                   shell_model: Optional[Vector] = None,
                   nlds: Optional[List[Vector]] = None,
-                  gsfs: Optional[List[Vector]] = None,
-                  norm_pars: Optional[NormalizationParameters] = None) -> any:
+                  gsfs: Optional[List[Vector]] = None) -> any:
         """ Docstring!
         """
 
@@ -176,43 +192,48 @@ class NormalizerSim(AbstractNormalizer):
         N = len(nlds)
         nld_sig = list(dict(signature(self.nld_model).parameters).keys())
         gsf_sig = list(dict(signature(self.gsf_model).parameters).keys())
+        spc_sig = list(dict(signature(self.spc_model).parameters).keys())
         N_nld_par = len(nld_sig)-1
         N_gsf_par = len(gsf_sig)-1
+        N_spc_par = len(spc_sig)-1
         nld_names = nld_sig[1:N_nld_par+1]
         gsf_names = gsf_sig[1:N_gsf_par+1]
-        Nvars = 3*N + N_nld_par + N_gsf_par
-
-        self.norm_pars = self.self_if_none(norm_pars)
-        self.norm_pars.is_changed(include=["D0", "Sn", "spincutModel",
-                                           "spincutPars"])  # check that set
+        spc_names = spc_sig[1:N_spc_par+1] if N_spc_par > 0 else []
+        Nvars = 3*N + N_nld_par + N_gsf_par + N_spc_par
 
         # First we need to ensure that we have a meaningful priors
         lnl = EnsembleLikelihood(nlds, gsfs, nld_limit_low, nld_limit_high,
                                  gsf_limit_low, gsf_limit_high, discrete,
-                                 shell_model, self.nld_model, self.gsf_model)
+                                 shell_model, self.nld_model, self.gsf_model,
+                                 self.spc_model, self.norm_pars)
 
         def const_prior(x):
             #return normal(x, 1., 10.)
             #return truncnorm(x, 0, np.inf, 1., 10.)
-            return 10**uniform(x, -3, 3)
+            return 10**uniform(x, -5, 3)
             #return 10**normal(x, 0, 1.)
 
         prp = EnsemblePrior(A=const_prior,
-                            B=const_prior,
+                            B=const_prior,#lambda x: 10**truncnorm(x, -3., np.inf, 0., 6),
                             alpha=lambda x: uniform(x, -10, 10),
                             nld_param=self.nld_prior, gsf_param=self.gsf_prior,
-                            N=N, N_nld_par=N_nld_par, N_gsf_par=N_gsf_par)
+                            spc_param=self.spc_prior, N=N, N_nld_par=N_nld_par,
+                            N_gsf_par=N_gsf_par, N_spc_par=N_spc_par)
 
         names = ['A[%d]' % i for i in range(N)]
         names += ['B[%d]' % i for i in range(N)]
         names += ['alpha[%d]' % i for i in range(N)]
-        names += nld_names + gsf_names
+        names += nld_names + gsf_names + spc_names
 
         def prior(cube, ndim, nparams):
             prp(cube)
 
         def loglike(cube, ndim, nparams):
             return lnl(prp(cube))
+
+        #print(self.spc_prior([0.4, 0.45]))
+        print(loglike(np.random.rand(Nvars), None, None))
+        #return
 
 
         self.multinest_path.mkdir(exist_ok=True)
@@ -246,7 +267,11 @@ class NormalizerSim(AbstractNormalizer):
             med = m['median']
             sigma = (hi - lo) / 2
             popt[name] = (med, sigma)
-            i = max(0, int(-np.floor(np.log10(sigma))) + 1)
+            i = 2
+            try:
+                i = max(0, int(-np.floor(np.log10(sigma))) + 1)
+            except:
+                i = 2
             fmt = '%%.%df' % i
             fmts = '\t'.join([fmt + " ± " + fmt])
             vals.append(fmts % (med, sigma))
@@ -267,6 +292,13 @@ class NormalizerSim(AbstractNormalizer):
         gsf = self.SLMO(E, slmo_mean, slmo_width, slmo_size, T)
         gsf += self.SLO(E, sf_mean, sf_width, sf_size)
         gsf += self.UB_model(E, renorm)
+        return gsf
+
+    def qrpa_gsf_model(self, E: ndarray,
+                       qrpa_renorm: float,
+                       renorm: float) -> ndarray:
+        gsf = self.QRPA_model(E)*qrpa_renorm
+        gsf += self.UB_model(E, 1.0)
         return gsf
 
     @staticmethod
@@ -295,7 +327,8 @@ class NormalizerSim(AbstractNormalizer):
         """ The SLMO model for the gSF"""
 
         width_ = width*(E/mean + (2*np.pi*T/mean)**2)
-        slmo = 8.6737e-8*size/(1-np.exp(-E/T))
+        slmo = 8.6737e-8*size/(1-np.exp(E/T))
+        print(slmo)
         slmo *= (2./np.pi)*E*width_
         slmo /= ((E**2 - mean**2)**2 + (E*width_)**2)
         return slmo
@@ -307,6 +340,91 @@ class NormalizerSim(AbstractNormalizer):
         slo = 8.6737e-8*size*E*width**2
         slo /= ((E**2 - mean**2)**2 + (E*width)**2)
         return slo
+
+    @staticmethod
+    def GLO(E: ndarray, mean: float, width: float, size: float,
+            T: float) -> ndarray:
+        """ The generalized Lorentzian of Kopecky and Uhl. """
+
+        # T is the temperature at the final NLD. We could
+        # get this directly from rho, but not now...
+        # For now we will assume constant... :p
+
+        width_ = width*(E**2 + (2*np.pi*T)**2)/mean**2
+        glo = E*width_/((E**2 - mean**2)**2+(E*width_)**2)
+        glo += 0.7*width*(2*np.pi*T)**2/mean**3
+        glo *= 8.6737e-8*size*width
+        return glo
+
+
+    @staticmethod
+    def GetSpinPrior(norm_pars):
+        if norm_pars.spincutModel == 'MG17':
+            mean = np.array([norm_pars.spincutPars['sigmaD'][0],
+                             norm_pars.spincutPars['sigmaSn'][0]])
+            std = np.array([norm_pars.spincutPars['sigmaD'][1],
+                            norm_pars.spincutPars['sigmaSn'][1]])
+            return lambda x: normal(x, mean, std)
+        else:
+            raise NotImplementedError("Prior for spin cut model '%s' has not \
+                yet been implemented" % norm_pars.spincutModel)
+
+    def GetSpinModel(self, norm_pars):
+        Js = NormalizerSim.GetJs(norm_pars.Jtarget, norm_pars.A % 2 == 1)
+        if norm_pars.spincutModel == 'MG17':
+            Sn = norm_pars.Sn[0]
+            Ed = norm_pars.spincutPars['Ed']
+            return lambda E, sigmaD, sigmaSn:\
+                self.spin_dist(self.Sigma_MG17(E, sigmaD, sigmaSn, Ed, Sn), Js)
+        else:
+            raise NotImplementedError("Spin-cut model '%s' has not been \
+                implemented yet." % norm_pars.spincutModel)
+
+    @staticmethod
+    def GetJs(J, odd):
+        Js = None
+        if J == 0:
+            Js = np.array([0., 1.])
+        else:
+            Js = np.array([J-1, J, J+1])
+        if odd:
+            Js += 0.5
+        return Js
+
+    @staticmethod
+    def Sigma_MG17(E: Union[float, ndarray], sigmaD: float, sigmaSn: float,
+                   Ed: float, Sn: float) -> Union[float, ndarray]:
+        """
+        """
+        if isinstance(E, float):
+            E = E if E > Ed else Ed
+        else:
+            E[E < Ed] = Ed
+        sigma = sigmaD**2 + (E - Ed)*(sigmaSn**2 - sigmaD**2)/(Ed-Sn)
+        sigma = np.sqrt(sigma)
+        if isinstance(E, float):
+            sigma = sigma if E > Ed else sigmaD**2
+        else:
+            sigma[E <= Ed] = sigmaD
+        return sigma
+
+    @staticmethod
+    def spin_dist(sigma: Union[float, ndarray],
+                  J: Union[float, ndarray]) -> Union[float, ndarray]:
+        """
+        """
+        sigma = sigma**2
+        spinDist = np.zeros(sigma.shape)
+
+        if isinstance(J, float):
+            return ((2. * J + 1.) / (2. * sigma)
+                    * np.exp(-np.power(J + 0.5, 2.) / (2. * sigma)))
+
+        for j in J:
+            spinDist += ((2. * j + 1.) / (2. * sigma)
+                         * np.exp(-np.power(j + 0.5, 2.) / (2. * sigma)))
+        return spinDist  # return 1D if Ex or J is single entry
+
 
     def UB_model(self, E: ndarray, renorm: float) -> ndarray:
         """ Model of the upbend. In this case we expect
@@ -405,6 +523,10 @@ class NormalizerSim(AbstractNormalizer):
         """ wrapper for lib.self_if_none """
         return self_if_none(self, *args, **kwargs)
 
+
+def qrpa_prior(x):
+    return truncnorm(x, np.array([0., 1.]), np.array([np.inf, 1]),
+                     np.array([1.0, 1.0]), np.array([0.1, 0.001]))
 
 def load_levels_discrete(path: Union[str, Path], energy: ndarray) -> Vector:
     """ Load discrete levels without smoothing

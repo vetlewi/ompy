@@ -1,5 +1,6 @@
 import numpy as np
 import pymc3 as pm
+import pymc3.math as pmm
 import theano
 import copy
 import logging
@@ -22,12 +23,12 @@ from .spinfunctions import SpinFunctions
 from .filehandling import load_discrete
 from .models import ResultsNormalized, NormalizationParameters
 from .abstract_normalizer import AbstractNormalizer
-#from .GamGamIntegrator import GamGamIntegrator,SpinDist,GamGamFuctional, GamGam
-from .gsf_functions import SLMO_model, SLO_model, UB_model
+#from .distributions import SLMO, SLO, UB
+
 
 class NormalizerPYMC(AbstractNormalizer):
     """ A re-implementation of the NormalizeNLD class using the
-        pyMC3 rather than Multinest. 
+        pyMC3 rather than Multinest.
     """
     LOG = logging.getLogger(__name__)  # overwrite parent variable
     logging.captureWarnings(True)
@@ -49,7 +50,6 @@ class NormalizerPYMC(AbstractNormalizer):
             norm_pars:
         """
         super().__init__(regenerate)
-
 
         self._discrete = None
         self._cumulative = None
@@ -83,10 +83,25 @@ class NormalizerPYMC(AbstractNormalizer):
                   discrete: Optional[Vector] = None,
                   norm_pars: Optional[NormalizationParameters] = None,
                   regenerate: Optional[bool] = None,
+                  sm: Optional[Vector] = None,
                   E_pred: ndarray = np.linspace(0, 20., 1001),
                   num: int = 0,
                   **kwargs) -> any:
+        """ Normalize the NLD and gSF with the selected model.
 
+        Args:
+            limit_low:
+            limit_high:
+            nld:
+            gsf:
+            discrete:
+            norm_pars:
+            regenerate:
+            E_pred:
+            num:
+            **kwargs:
+        Returns: The pyMC trace.
+        """
 
         regenerate = self.self_if_none(regenerate)
 
@@ -108,13 +123,12 @@ class NormalizerPYMC(AbstractNormalizer):
         discrete.to_MeV()
         nld = self.self_if_none(nld)
         self.nld = nld.copy()
-        self.nld.to_MeV() # Make sure E is in right scale
+        self.nld.to_MeV()  # Make sure E is in right scale
         nld = self.nld.copy()
 
         self.norm_pars = self.self_if_none(norm_pars)
         self.norm_pars.is_changed(include=["D0", "Sn", "spincutModel",
                                            "spincutPars"])  # check that set
-
 
         # ensure that it's updated if running again
         self.res = ResultsNormalized(name="Results NLD")
@@ -127,29 +141,43 @@ class NormalizerPYMC(AbstractNormalizer):
         # Get the model we will use
         model = None
         if self.model.upper() == 'CT':
-            self.model_range = np.linspace(limit_high[0],  self.norm_pars.Sn[0], 101)
-            model = self.setup_CT_model(nld=nld, #gsf=gsf, 
-                                        limit_low=limit_low, limit_high=limit_high,
+            self.model_range = np.linspace(limit_high[0],
+                                           self.norm_pars.Sn[0], 101)
+            model = self.setup_CT_model(nld=nld,
+                                        limit_low=limit_low,
+                                        limit_high=limit_high,
                                         model_range=self.model_range)
         elif self.model.upper() == 'BSFG':
-            self.model_range = np.linspace(limit_high[0],  self.norm_pars.Sn[0], 101)
-            model = self.setup_BSFG_model(nld=nld, gsf=gsf, 
-                                        limit_low=limit_low, limit_high=limit_high,
-                                        model_range=self.model_range)
+            self.model_range = np.linspace(limit_high[0],
+                                           self.norm_pars.Sn[0], 101)
+            model = self.setup_BSFG_model(nld=nld, gsf=gsf,
+                                          limit_low=limit_low,
+                                          limit_high=limit_high,
+                                          model_range=self.model_range)
             with model:
                 trace = pm.sample(**kwargs)
-            self.trace = trace
+                self.trace = trace
             return trace, E_pred
         else:
-            raise NotImplementedError('Only CT or BSFG model have been implemented.')
+            raise NotImplementedError(
+                'Only CT or BSFG model have been implemented.')
 
         # Make sure we also have the gSF fitted
         mode_init = copy.deepcopy(model)
         with mode_init:
             trace = pm.sample()
-        model = self.setup_gsf_model(pymc_model=model, nld_trace=trace, gsf=gsf,
-                                     E_pred=E_pred)
+        self.trace = trace
+        # model = self.setup_gsf_model(pymc_model=model, nld_trace=trace,
+        #                             gsf=gsf, E_pred=E_pred)
+
+        model = self.setup_gsf_model_ub_onl(pymc_model=model,
+                                            alpha=trace['α'].mean(),
+                                            T=trace['T'].mean(),
+                                            sm=sm, E_pred=E_pred,
+                                            gsf=gsf)
+        #return trace, model
         # Now we can infere the NLD
+        print(model)
         with model:
             trace = pm.sample(**kwargs)
         self.trace = trace
@@ -165,6 +193,7 @@ class NormalizerPYMC(AbstractNormalizer):
                 return fmts % (trace.mean(), trace.std())
             strs = [fmt_tbl(trace[name]) for name in names]
             return strs
+
         def tbl_str(trace, hdrs):
             tbl = ''
             for i, hdr in enumerate(hdrs):
@@ -175,10 +204,12 @@ class NormalizerPYMC(AbstractNormalizer):
             return tbl
 
         hdr = ['A', 'B', 'α', 'T', 'Eshift', 'ϵ', 'ν']
-        hdr2 = ['rhoSn', 'D0', 'gsf_ϵ', 'gsf_ν']
-        hdr3 = ['gdr_mean', 'gdr_width', 'gdr_size', 'sf_mean', 'sf_width', 'sf_size', 'beta', 'gamma']
+        hdr2 = ['B', 'α', 'gsf_ϵ', 'gsf_ν']
+        #hdr3 = ['gdr_mean', 'gdr_width', 'gdr_size', 'sf_mean', 'sf_width', 'sf_size', 'beta', 'gamma']
+        hdr3 = ['gdr_mean', 'gdr_width', 'gdr_size', 'sf_mean', 'sf_width',
+                'sf_size', 'sm_renorm']
 
-        self.LOG.info("pyMC3 results:\n%s", tbl_str(trace, [hdr,hdr2,hdr3]))
+        #self.LOG.info("pyMC3 results:\n%s", tbl_str(trace, [hdr, hdr2, hdr3]))
 
         return trace, E_pred
 
@@ -217,13 +248,13 @@ class NormalizerPYMC(AbstractNormalizer):
             x = np.linspace(smin, smax, 100)
             y = stats.gaussian_kde(samples)(x)
             return pm.Interpolated(param, x, y)
-        
+
         E_pred_np = np.linspace(0, 20, 1001)
         gsf = self.self_if_none(gsf).copy()
         nld = self.self_if_none(nld).copy()
         gsf.to_MeV()
         nld.to_MeV()
-        
+
         # We need an initial guess for the B value. This is done by estimating
         # Best = SMLO(E[-1])/gsf(E[-1])*exp(-α*E[-1])
         # B ~ N(Best, 10*Best)
@@ -256,7 +287,7 @@ class NormalizerPYMC(AbstractNormalizer):
             # Priors
             B = pm.Bound(pm.Normal, lower=0)('B', mu=Best, sigma=4*Best)
             D = pm.Deterministic('D', pm.math.log(B))
-            
+
             gdr_mean = pm.Normal("gdr_mean", mu=self.norm_pars.GSFmodelPars['GDR']['E'],
                                  sigma=self.norm_pars.GSFmodelPars['GDR']['E_err'])
             gdr_width = pm.Normal("gdr_width", mu=self.norm_pars.GSFmodelPars['GDR']['G'],
@@ -297,9 +328,228 @@ class NormalizerPYMC(AbstractNormalizer):
 
         return gsf_model, E_pred_np
 
+    def setup_gsf_model_ub_onl(self, pymc_model: pm.Model,
+                               alpha: float, T: float, sm: Vector,
+                               E_pred: ndarray = np.linspace(0, 20., 1001),
+                               gsf: Optional[Vector] = None):
+        """
+        """
+
+        gsf = self.self_if_none(gsf).copy()
+        gsf.to_MeV()
+
+        # First we need to create an interpolation object
+        # to generate the SM data points used in the fit
+        sm = sm.copy()
+        sm.to_MeV()
+
+        def make_extra(vec, max_E):
+            Norm = vec.values[-1]
+            de = vec.E[1]-vec.E[0]
+            new_Es = np.arange(vec.E[-1], max_E, de)
+            new_Es += de
+            new_Vs = Norm*np.exp(-(new_Es - vec.E[-1])**2/(2))
+            return Vector(E=np.append(vec.E, new_Es),
+                          values=np.append(vec.values, new_Vs))
+
+        # Need to make sure that if the last point is not zero, the
+        # we need to artificially exponentially go to zero.
+        if sm.values[-1] != 0:
+            sm = make_extra(sm, max(E_pred))
+
+        sm_interp = log_interp1d(sm.E, sm.values, bounds_error=False,
+                                 fill_value=(-np.inf, -np.inf))
+
+        sm.cut(min(gsf.E), max(gsf.E), inplace=True)
+
+        # Estimate B to get a well behaved prior
+        gsf_fit = gsf.cut(min(gsf.E), 2, inplace=False)
+        sm_fit = sm.cut(min(gsf.E), 2, inplace=False)
+        gsf_tmp = gsf.cut(3.5, 1e9, inplace=False)
+        gsf_tmp.transform(alpha=alpha, inplace=True)
+        Best, Best_err = estimate_B(gsf_tmp, lambda E: self.E1SF_model(E, T))
+        # return Best, Best_err
+
+        gsf_fit.E = np.append(gsf_fit.E, gsf.cut(3.5, np.inf, inplace=False).E)
+        gsf_fit.values = np.append(gsf_fit.values,
+                                   gsf.cut(3.5, np.inf, inplace=False).values)
+        sm_fit.E = np.append(sm_fit.E, sm.cut(3.5, np.inf, inplace=False).E)
+        sm_fit.values = np.append(sm_fit.values,
+                                  sm.cut(3.5, np.inf, inplace=False).values)
+
+        gsf_pars = self.norm_pars.GSFmodelPars
+
+        with pymc_model:
+
+            # Add data
+            E_gsf_fit = pm.Data('E_gsf_fit', gsf_fit.E)
+            v_gsf_fit = pm.Data('v_gsf_fit', gsf_fit.values)
+            v_sm_fit = pm.Data('v_sm_fit', sm_fit.values)
+            E_gsf = pm.Data('E_gsf', gsf.E)
+            v_gsf = pm.Data('v_gsf', gsf.values)
+            v_sm = pm.Data('v_sm', sm.values)
+
+            E_prd = pm.Data('E_prd', E_pred)
+            sm_prd = pm.Data('sm_prd', sm_interp(E_pred))
+
+            # Priors
+            B = pm.TruncatedNormal('B', mu=Best, sigma=Best, testval=Best, lower=0.0)
+            D = pm.Deterministic('D', pm.math.log(B))
+            D_e = D
+            #D = pm.Uniform('D', np.log10(Best)-, np.log10(Best)+4, testval=np.log10(Best))
+            #B = pm.Deterministic('B', 10**D)
+            #D_e = pm.Deterministic('D_e', pmm.log(B))
+
+            gdr_mean = pm.TruncatedNormal("gdr_mean", mu=gsf_pars['GDR']['E'],
+                                          sigma=gsf_pars['GDR']['E_err'],
+                                          testval=gsf_pars['GDR']['E'],
+                                          lower=0.0)
+            gdr_width = pm.TruncatedNormal("gdr_width",
+                                           mu=gsf_pars['GDR']['G'],
+                                           sigma=gsf_pars['GDR']['G_err'],
+                                           testval=gsf_pars['GDR']['G'],
+                                           lower=0.0)
+            gdr_size = pm.TruncatedNormal("gdr_size", mu=gsf_pars['GDR']['S'],
+                                          sigma=gsf_pars['GDR']['S_err'],
+                                          testval=gsf_pars['GDR']['S'],
+                                          lower=0.0)
+            sf_mean = pm.TruncatedNormal("sf_mean", mu=gsf_pars['SF']['E'],
+                                         sigma=gsf_pars['SF']['E_err'],
+                                         testval=gsf_pars['SF']['E'],
+                                         lower=0.0)
+            sf_width = pm.TruncatedNormal("sf_width", mu=gsf_pars['SF']['G'],
+                                          sigma=gsf_pars['SF']['G_err'],
+                                          testval=gsf_pars['SF']['G'],
+                                          lower=0.0)
+            sf_size = pm.TruncatedNormal("sf_size", mu=gsf_pars['SF']['S'],
+                                         sigma=gsf_pars['SF']['S_err'],
+                                         testval=gsf_pars['SF']['S'],
+                                         lower=0.0)
+
+            #ub_scale = pm.Uniform('ub_scale', 1., 4.)
+
+            def GDR_model(E):
+                return SLMO_model(E, gdr_mean, gdr_width, gdr_size,
+                                  pymc_model.T)
+
+            def SF_model(E):
+                return SLO_model(E, sf_mean, sf_width, sf_size)
+
+            gsf_norm = pm.Deterministic('gsf_norm',
+                                        B*v_gsf*pmm.exp(pymc_model.α*E_gsf))
+            GDR_pred = pm.Deterministic('GDR_pred', GDR_model(E_prd))
+            SF_pred = pm.Deterministic('SF_pred', SF_model(E_prd))
+            UB_pred = pm.Deterministic('UB_pred', sm_prd)#*ub_scale)
+            gsf_pred = pm.Deterministic('gsf_pred', GDR_pred+SF_pred+UB_pred)
+
+            gsf_ϵ = pm.HalfNormal('gsf_ϵ', 5)
+            gsf_ν_ = pm.Exponential('gsf_ν_', 1/29)
+            gsf_ν = pm.Deterministic('gsf_ν', gsf_ν_ + 1)
+
+            #gsf_mod = GDR_model(E_gsf_fit)+SF_model(E_gsf_fit)+v_sm_fit
+
+            #mu_obs = gsf_mod*pmm.exp(-pymc_model.α*E_gsf_fit)/B
+            mu_obs = pymc_model.α*E_gsf_fit + D
+            gsf_obs = pm.StudentT('gsf_obs', mu=mu_obs,
+                                  sd=gsf_ϵ, nu=gsf_ν,
+                                  observed=pmm.log(v_sm_fit/v_gsf_fit))
+        return pymc_model
+
+    def setup_gsf_model_exp_ub(self, pymc_model: pm.Model,
+                               alpha: float, T: float, sm: Vector,
+                               E_pred: ndarray = np.linspace(0, 20., 1001),
+                               gsf: Optional[Vector] = None):
+        """
+        """
+
+        gsf = self.self_if_none(gsf).copy()
+        gsf.to_MeV()
+
+        # First we need to create an interpolation object
+        # to generate the SM data points used in the fit
+        sm = sm.copy()
+        sm.to_MeV()
+        sm_interp = log_interp1d(sm.E, sm.values, bounds_error=False,
+                                 fill_value=(-np.inf, -np.inf))
+
+
+        # Estimate B to get a well behaved prior
+        gsf_tmp = gsf.cut(3.5, 1e9, inplace=False)
+        gsf_tmp.transform(alpha=alpha, inplace=True)
+        Best, Best_err = estimate_B(gsf_tmp, lambda E: self.E1SF_model(E, T))
+
+        gsf_pars = self.norm_pars.GSFmodelPars
+
+        with pymc_model:
+
+            # Add data
+            E_gsf = pm.Data('E_gsf', gsf.E)
+            v_gsf = pm.Data('v_gsf', gsf.values)
+            v_sm = pm.Data('v_sm', sm_interp(gsf.E))
+
+            E_prd = pm.Data('E_prd', E_pred)
+            sm_prd = pm.Data('sm_prd', sm_interp(E_pred))
+
+            # Priors
+            B = pm.Bound(pm.Normal, lower=0)('B', mu=Best, sigma=Best,
+                                             testval=Best)
+            D = pm.Deterministic('D', pm.math.log(B))
+
+            gdr_mean = pm.Normal("gdr_mean", mu=gsf_pars['GDR']['E'],
+                                 sigma=gsf_pars['GDR']['E_err'],
+                                 testval=gsf_pars['GDR']['E'])
+            gdr_width = pm.Normal("gdr_width", mu=gsf_pars['GDR']['G'],
+                                  sigma=gsf_pars['GDR']['G_err'],
+                                  testval=gsf_pars['GDR']['G'])
+            gdr_size = pm.Normal("gdr_size", mu=gsf_pars['GDR']['S'],
+                                 sigma=gsf_pars['GDR']['S_err'],
+                                 testval=gsf_pars['GDR']['S'])
+            sf_mean = pm.Normal("sf_mean", mu=gsf_pars['SF']['E'],
+                                sigma=gsf_pars['SF']['E_err'],
+                                testval=gsf_pars['SF']['E'],)
+            sf_width = pm.Normal("sf_width", mu=gsf_pars['SF']['G'],
+                                 sigma=gsf_pars['SF']['G_err'],
+                                 testval=gsf_pars['SF']['G'])
+            sf_size = pm.Normal("sf_size", mu=gsf_pars['SF']['S'],
+                                sigma=gsf_pars['SF']['S_err'],
+                                testval=gsf_pars['SF']['S'])
+
+            # sm_renorm_log = pm.Uniform('sm_renorm_log', 0, 1)
+            sm_renorm = pm.Uniform('sm_renorm', 1, 4)
+            # sm_renorm = pm.Deterministic('sm_renorm', 10**sm_renorm_log)
+
+            def GDR_model(E):
+                return SLMO_model(E, gdr_mean, gdr_width, gdr_size,
+                                  pymc_model.T)
+
+            def SF_model(E):
+                return SLO_model(E, sf_mean, sf_width, sf_size)
+
+            gsf_norm = pm.Deterministic('gsf_norm',
+                                        B*v_gsf*pmm.exp(pymc_model.α*E_gsf))
+            gsf_mod = pm.Deterministic('gsf_mod',
+                                       GDR_model(E_gsf) +
+                                       SF_model(E_gsf) +
+                                       sm_renorm*v_sm)
+            GDR_pred = pm.Deterministic('GDR_pred', GDR_model(E_prd))
+            SF_pred = pm.Deterministic('SF_pred', SF_model(E_prd))
+            UB_pred = pm.Deterministic('UB_pred', sm_renorm*sm_prd)
+            gsf_pred = pm.Deterministic('gsf_pred', GDR_pred+SF_pred+UB_pred)
+
+            gsf_ϵ = pm.HalfNormal('gsf_ϵ', 5)
+            gsf_ν_ = pm.Exponential('gsf_ν_', 1/29)
+            gsf_ν = pm.Deterministic('gsf_ν', gsf_ν_ + 1)
+
+            mu_obs = gsf_mod*pmm.exp(-pymc_model.α*E_gsf)/B
+            gsf_obs = pm.StudentT('gsf_obs', mu=mu_obs,
+                                  sd=gsf_ϵ, nu=gsf_ν,
+                                  observed=v_gsf)
+        return pymc_model
+
     def setup_gsf_model(self, pymc_model: pm.Model,
-                         nld_trace: any, E_pred: ndarray = np.linspace(0, 20., 1001),
-                         gsf: Optional[Vector] = None) -> pm.Model:
+                        nld_trace: any,
+                        E_pred: ndarray = np.linspace(0, 20., 1001),
+                        gsf: Optional[Vector] = None) -> pm.Model:
         """ Method for extending a NLD CT fit with fit of gSF to model.
         Currently the model that will be fitted is:
             f(Eg) = fSLMO(Eg) + fSLO(Eg) + strength*exp(-slope*Eg)/(3*pi^2*hbar^2*c^2)
@@ -317,18 +567,27 @@ class NormalizerPYMC(AbstractNormalizer):
         gsf = self.self_if_none(gsf).copy()
         gsf.to_MeV()
 
-        gsf_model = lambda E: self.E1SF_model(E, nld_trace['T'].mean())
-        Best, Best_err = estimate_B(gsf.cut(3.5, 1e9, inplace=False).transform(alpha=nld_trace['α'].mean(), inplace=False),
-                                    gsf_model)
-        ub_slope, ub_size = estimate_upbend(gsf.cut(0, 2.5, inplace=False).transform(Best, nld_trace['α'].mean(), inplace=False),
-                                            gsf_model)
+        def gsf_model(E):
+            return self.E1SF_model(E, nld_trace['T'].mean())
 
-        self.LOG.info("Estimated GSF parameters\n%s", tt.to_string([[Best, ub_slope, ub_size]],
-                      header=['Best', 'UB slope [1/MeV]', 'UB strength [mb/MeV]']))
+        gsf_tmp = gsf.cut(3.5, 1e9, inplace=False)
+        gsf_tmp.transform(alpha=nld_trace['α'].mean(), inplace=True)
+        Best, Best_err = estimate_B(gsf_tmp, gsf_model)
+        gsf_tmp = gsf.cut(0, 2.5, inplace=False)
+        gsf_tmp.transform(Best, nld_trace['α'].mean(), inplace=True)
+        ub_slope, ub_size = estimate_upbend(gsf_tmp, gsf_model)
+
+        self.LOG.info("Estimated GSF parameters\n%s",
+                      tt.to_string([[Best, ub_slope, ub_size]],
+                                   header=['Best',
+                                           'UB slope [1/MeV]',
+                                           'UB strength [mb/MeV]']))
 
         # At the moment, we are unable to fit with std of the gSF
         if gsf.std is not None:
             gsf.std = None
+
+        gsf_pars = self.norm_pars.GSFmodelPars
 
         with pymc_model:
 
@@ -341,47 +600,66 @@ class NormalizerPYMC(AbstractNormalizer):
             # Priors
             B = pm.Bound(pm.Normal, lower=0)('B', mu=Best, sigma=Best)
             D = pm.Deterministic('D', pm.math.log(B))
-            
-            gdr_mean = pm.Normal("gdr_mean", mu=self.norm_pars.GSFmodelPars['GDR']['E'],
-                                 sigma=self.norm_pars.GSFmodelPars['GDR']['E_err'])
-            gdr_width = pm.Normal("gdr_width", mu=self.norm_pars.GSFmodelPars['GDR']['G'],
-                                 sigma=self.norm_pars.GSFmodelPars['GDR']['G_err'])
-            gdr_size = pm.Normal("gdr_size", mu=self.norm_pars.GSFmodelPars['GDR']['S'],
-                                 sigma=self.norm_pars.GSFmodelPars['GDR']['S_err'])
-            sf_mean = pm.Normal("sf_mean", mu=self.norm_pars.GSFmodelPars['SF']['E'],
-                                sigma=self.norm_pars.GSFmodelPars['SF']['E_err'])
-            sf_width = pm.Normal("sf_width", mu=self.norm_pars.GSFmodelPars['SF']['G'],
-                                sigma=self.norm_pars.GSFmodelPars['SF']['G_err'])
-            sf_size = pm.Normal("sf_size", mu=self.norm_pars.GSFmodelPars['SF']['S'],
-                                sigma=self.norm_pars.GSFmodelPars['SF']['S_err'])
+
+            gdr_mean = pm.Normal("gdr_mean", mu=gsf_pars['GDR']['E'],
+                                 sigma=gsf_pars['GDR']['E_err'])
+            gdr_width = pm.Normal("gdr_width", mu=gsf_pars['GDR']['G'],
+                                  sigma=gsf_pars['GDR']['G_err'])
+            gdr_size = pm.Normal("gdr_size", mu=gsf_pars['GDR']['S'],
+                                 sigma=gsf_pars['GDR']['S_err'])
+            sf_mean = pm.Normal("sf_mean", mu=gsf_pars['SF']['E'],
+                                sigma=gsf_pars['SF']['E_err'])
+            sf_width = pm.Normal("sf_width", mu=gsf_pars['SF']['G'],
+                                 sigma=gsf_pars['SF']['G_err'])
+            sf_size = pm.Normal("sf_size", mu=gsf_pars['SF']['S'],
+                                sigma=gsf_pars['SF']['S_err'])
 
             beta = pm.Normal('beta', mu=ub_slope, sigma=ub_slope)
             gamma = pm.Normal('gamma', mu=ub_size, sigma=ub_size)
 
-            GDR_model = lambda E: SLMO_model(E, gdr_mean, gdr_width, gdr_size, pymc_model.T)
-            SF_model = lambda E: SLO_model(E, sf_mean, sf_width, sf_size)
-            ub_model = lambda E: UB_model(E, beta, gamma)
+            def GDR_model(E):
+                return SLMO_model(E, gdr_mean, gdr_width, gdr_size,
+                                  pymc_model.T)
 
-            gsf_norm = pm.Deterministic('gsf_norm', B*gsf_v*pm.math.exp(pymc_model.α*E_gsf))
-            gsf_mod = pm.Deterministic('gsf_mod', GDR_model(E_gsf)+SF_model(E_gsf)+ub_model(E_gsf))
-            gsf_pred = pm.Deterministic('gsf_pred', GDR_model(E_prd)+SF_model(E_prd)+ub_model(E_prd))
-            
+            def SF_model(E):
+                return SLO_model(E, sf_mean, sf_width, sf_size)
+
+            def ub_model(E):
+                return UB_model(E, beta, gamma)
+            # For now, we will skip this...
+            # ub_model = lambda E: UB_model(E, beta, gamma)
+
+            gsf_norm = pm.Deterministic('gsf_norm',
+                                        B*gsf_v*pmm.exp(pymc_model.α*E_gsf))
+            gsf_mod = pm.Deterministic('gsf_mod',
+                                       GDR_model(E_gsf) +
+                                       SF_model(E_gsf) +
+                                       ub_model(E_gsf))
+
+            gsf_pred = pm.Deterministic('gsf_pred',
+                                        GDR_model(E_prd) +
+                                        SF_model(E_prd) +
+                                        ub_model(E_prd))
+
             if gsf.std is None:
                 gsf_ϵ = pm.HalfNormal('gsf_ϵ', 5)
                 gsf_ν_ = pm.Exponential('gsf_ν_', 1/29)
                 gsf_ν = pm.Deterministic('gsf_ν', gsf_ν_ + 1)
-                gsf_obs = pm.StudentT('gsf_obs', mu=gsf_mod*pm.math.exp(-pymc_model.α*E_gsf)/B, sd=gsf_ϵ, nu=gsf_ν, observed=gsf_v)
+                gsf_obs = pm.StudentT('gsf_obs',
+                                      mu=gsf_mod*pmm.exp(-pymc_model.α*E_gsf)/B,
+                                      sd=gsf_ϵ, nu=gsf_ν, observed=gsf_v)
             else:
                 gsf_sigma = pm.Data('gsf_sigma', gsf.std)
-                gsf_obs = pm.Normal('gsf_obs', mu=pymc_model.α*E_gsf + D, sigma=gsf_sigma, observed=pm.math.log(gsf_mod/gsf_v))
+                gsf_obs = pm.Normal('gsf_obs', mu=pymc_model.α*E_gsf + D,
+                                    sigma=gsf_sigma,
+                                    observed=pm.math.log(gsf_mod/gsf_v))
         return pymc_model
 
-
     def setup_CT_model(self, nld: Optional[Vector] = None,
-                       limit_low: Optional[Tuple[float,float]] = None,
-                       limit_high: Optional[Tuple[float,float]] = None,
+                       limit_low: Optional[Tuple[float, float]] = None,
+                       limit_high: Optional[Tuple[float, float]] = None,
                        model_range: Optional[np.ndarray] = None,
-                       pymc_model = None) -> pm.Model:
+                       pymc_model=None) -> pm.Model:
         """ Method responsible for declaring our pyMC model.
         """
 
@@ -462,7 +740,8 @@ class NormalizerPYMC(AbstractNormalizer):
             b1 = pm.Normal('b1', mu=0, sigma=100)
 
             c0 = pm.Normal('c0', mu=0, sigma=100)
-            c1 = pm.Normal('c1', mu=0, sigma=100)
+            T = pm.Uniform('T', 0, 3, testval=0.6)
+            #c1 = pm.Normal('c1', mu=0, sigma=100)
 
             # The spin_dist
             sigmaD = pm.Normal("sigmaD", mu=self.norm_pars.spincutPars['sigma2_disc'][1],
@@ -471,6 +750,7 @@ class NormalizerPYMC(AbstractNormalizer):
                                 sigma=0.1*self.norm_pars.spincutPars['sigma2_Sn'][1])
 
             α = pm.Deterministic('α', data_low['q_std']/data_low['E_std']*b1)
+            c1 = pm.Deterministic('c1', data_high['E_std']*(1/T - α)/data_high['q_std'])
             C = pm.Deterministic('C', data_low['q_mean'] + b0*data_low['q_std'] - α*data_low['E_mean'])
             A = pm.Deterministic('A', pm.math.exp(C))
 
@@ -480,7 +760,7 @@ class NormalizerPYMC(AbstractNormalizer):
             b1st = data_low['q_std']*b1/data_low['E_std']
             b0st = data_low['q_mean'] + b0*data_low['q_std'] - b1st*data_low['E_mean']
 
-            T = pm.Deterministic('T', 1./(c1st + b1st))
+            #T = pm.Deterministic('T', 1./(c1st + b1st))
             Eshift = pm.Deterministic('Eshift', pm.math.log(c1st + b1st)*T - (b0st + c0st)*T)
             
             Ed, Sn = self.norm_pars.spincutPars['sigma2_disc'][0], self.norm_pars.Sn[0]
