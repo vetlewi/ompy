@@ -53,5 +53,8 @@ else:
     from .models import (NormalizationParameters, ResultsNormalized,
                          ExtrapolationModelLow, ExtrapolationModelHigh)
     from .ensemble_prior import EnsemblePrior
+    from .ensemble_likelihood import ensemblelikelihood
     from .introspection import logging, hooks
+    from .gsf_model import *
+    from .likelihood import Likelihood, NormalLikelihood, OsloNormalLikelihood
     #from .distributions import SMLO, SLO

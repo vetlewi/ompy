@@ -70,7 +70,7 @@ class cnormal:
                  scale: Union[float, ndarray] = 1):
         self.loc = loc if isinstance(loc, float) else loc.copy()
         self.scale = scale if isinstance(scale, float) else scale.copy()
- 
+
     def __call__(x: Union[float, ndarray]) -> Union[float, ndarray]:
         return stats.norm.ppf(x, loc=self.loc, scale=self.scale)
 

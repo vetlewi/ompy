@@ -22,7 +22,8 @@ from .filehandling import load_discrete
 from .models import ResultsNormalized, NormalizationParameters
 from .abstract_normalizer import AbstractNormalizer
 from .extractor import Extractor
-from .ensemble_likelihood import EnsembleLikelihood
+from .ensemble_likelihood import *
+from .gsf_model import GSFmodel, GSF_model
 from .ensemble_prior import (EnsemblePrior, uniform, cnormal,
                              normal, truncnorm, exponential)
 
@@ -43,7 +44,7 @@ class NormalizerSim(AbstractNormalizer):
                  path: Optional[Union[str, Path]] = 'saved_run/normalizers',
                  regenerate: bool = False,
                  nld_model: str = 'CT',
-                 gsf_model: str = 'SM',
+                 gsf_model: any = 'SM',
                  spc_model: bool = False,
                  gdr_path: Optional[Union[str, pd.DataFrame]] = None,
                  norm_pars: NormalizationParameters) -> None:
@@ -99,32 +100,8 @@ class NormalizerSim(AbstractNormalizer):
             raise NotImplementedError("NLD model '%s' has not yet been \
                 implemented." % nld_model)
 
-        if gsf_model.upper() == 'SM':
-            self.gsf_model = lambda x, renorm: None
-            #self.gsf_model = lambda x: None
-            #self.gsf_prior = lambda x: None
-            #self.gsf_prior = lambda x: uniform(x, 1.0, 2.0)
-            self.gsf_prior = lambda x: truncnorm(x, 1.0, np.inf, 1.5, 0.75)
-        elif gsf_model.upper() == 'SM+SMLO':
-            try:
-                self.setup_slmo_prior(norm_pars)
-                self.gsf_model = self.slmo_gsf_model
-                self.gsf_prior = self.slmo_prior
-            except KeyError:
-                print("SLMO priors not found, falling back on SM only.")
-                self.gsf_model = lambda x, renorm: None
-                self.gsf_prior = lambda x: uniform(x, 1.0, 2.0)
-        elif gsf_model.upper() == 'SM+TABLE':
-            df_qrpa = pd.read_csv(gdr_path) if isinstance(gdr_path, str) \
-                else gdr_path
-            self.QRPA_model = log_interp1d(df_qrpa['Eg'], df_qrpa['gsf'],
-                                           bounds_error=False,
-                                           fill_value=(-np.inf, -np.inf))
-            self.gsf_model = self.qrpa_gsf_model
-            self.gsf_prior = qrpa_prior
-        else:
-            raise NotImplementedError("GSF model '%s' has not yet been \
-                implemented." % gsf_model)
+        self.gsf_model = gsf_model
+        self.gsf_prior = lambda x: self.gsf_model.prior(x)
 
         self.spc_model = self.GetSpinModel(norm_pars) \
             if spc_model else lambda x: None
@@ -151,7 +128,8 @@ class NormalizerSim(AbstractNormalizer):
                   discrete: Optional[Vector] = None,
                   shell_model: Optional[Vector] = None,
                   nlds: Optional[List[Vector]] = None,
-                  gsfs: Optional[List[Vector]] = None) -> any:
+                  gsfs: Optional[List[Vector]] = None,
+                  ext_logp: Callable[..., float] = None) -> any:
         """ Docstring!
         """
 
@@ -191,8 +169,16 @@ class NormalizerSim(AbstractNormalizer):
         # We determine the number of NLD model parameters
         N = len(nlds)
         nld_sig = list(dict(signature(self.nld_model).parameters).keys())
-        gsf_sig = list(dict(signature(self.gsf_model).parameters).keys())
         spc_sig = list(dict(signature(self.spc_model).parameters).keys())
+        gsf_sig = []
+        if isinstance(self.gsf_model, GSFmodel):
+            gsf_sig = self.gsf_model.par_names
+        else:
+            gsf_sig = list(dict(signature(self.gsf_model).parameters).keys())
+
+        if 'T' in nld_sig and 'T' in gsf_sig:
+            del gsf_sig[gsf_sig.index('T')]
+
         N_nld_par = len(nld_sig)-1
         N_gsf_par = len(gsf_sig)-1
         N_spc_par = len(spc_sig)-1
@@ -201,21 +187,53 @@ class NormalizerSim(AbstractNormalizer):
         spc_names = spc_sig[1:N_spc_par+1] if N_spc_par > 0 else []
         Nvars = 3*N + N_nld_par + N_gsf_par + N_spc_par
 
+        # ext_logp.model = lambda E, param: self.gsf_model(E, param)
+
         # First we need to ensure that we have a meaningful priors
-        lnl = EnsembleLikelihood(nlds, gsfs, nld_limit_low, nld_limit_high,
-                                 gsf_limit_low, gsf_limit_high, discrete,
-                                 shell_model, self.nld_model, self.gsf_model,
-                                 self.spc_model, self.norm_pars)
+        """lnl = EnsembleLikelihood(nlds=nlds, gsfs=gsfs,
+                                 nld_limit_low=nld_limit_low,
+                                 nld_limit_high=nld_limit_high,
+                                 gsf_limit_low=gsf_limit_low,
+                                 gsf_limit_high=gsf_limit_high,
+                                 nld_ref=discrete, gsf_ref=shell_model,
+                                 nld_model=self.nld_model,
+                                 gsf_model=self.gsf_model,
+                                 spc_model=self.spc_model,
+                                 gsf_ext_logp=ext_logp,
+                                 norm_pars=self.norm_pars)"""
+
+        lnl = ensemblelikelihood(nlds=nlds, gsfs=gsfs,
+                                 nld_limit_low=nld_limit_low,
+                                 nld_limit_high=nld_limit_high,
+                                 gsf_limit=gsf_limit_high,
+                                 nld_ref=discrete,
+                                 nld_model=self.nld_model,
+                                 gsf_model=self.gsf_model,
+                                 ext_gsf=ext_logp)
+
+        """lnl = OsloNormalize(nlds=nlds, gsfs=gsfs,
+                            nld_limit_low=nld_limit_low,
+                            nld_limit_high=nld_limit_high,
+                            gsf_limit=gsf_limit_high,
+                            nld_ref=discrete,
+                            nld_model='CT',
+                            gsf_model=self.gsf_model,
+                            ext_gsf_data={'x': ext_logp.x, 'y': ext_logp.y,
+                                          'yerr': ext_logp.yerr})"""
+
+        alphas = self.estimate_alpha(nlds, discrete, nld_limit_low)
+        xs = self.estimate_B(gsfs, self.gsf_model, alphas)
+
+        Bmean = np.array(xs)
 
         def const_prior(x):
-            #return normal(x, 1., 10.)
-            #return truncnorm(x, 0, np.inf, 1., 10.)
-            return 10**uniform(x, -5, 3)
-            #return 10**normal(x, 0, 1.)
+            return 10**uniform(x, 0, 4)
+
+        # To get a prior for the gSF, we find the best value of B using only the priors
 
         prp = EnsemblePrior(A=const_prior,
-                            B=const_prior,#lambda x: 10**truncnorm(x, -3., np.inf, 0., 6),
-                            alpha=lambda x: uniform(x, -10, 10),
+                            B=lambda x: normal(x, Bmean, 10*Bmean),
+                            alpha=lambda x: normal(x, 0, 10),
                             nld_param=self.nld_prior, gsf_param=self.gsf_prior,
                             spc_param=self.spc_prior, N=N, N_nld_par=N_nld_par,
                             N_gsf_par=N_gsf_par, N_spc_par=N_spc_par)
@@ -231,8 +249,12 @@ class NormalizerSim(AbstractNormalizer):
         def loglike(cube, ndim, nparams):
             return lnl(prp(cube))
 
+        def test(cube, ndim, nparams):
+            prp.prior(cube, ndim, nparams)
+            return lnl.loglike(cube, ndim, nparams)
+
         #print(self.spc_prior([0.4, 0.45]))
-        print(loglike(np.random.rand(Nvars), None, None))
+        print(test(np.random.rand(Nvars), Nvars, None))
         #return
 
 
@@ -256,8 +278,32 @@ class NormalizerSim(AbstractNormalizer):
                                         outputfiles_basename=str(path))
 
         mnstats = analyzer.get_stats()
-        samples = analyzer.get_equal_weighted_posterior()[:, :-1]
-        samples = dict(zip(names, samples.T))
+        samples = analyzer.get_equal_weighted_posterior()[:, :-1].T
+
+        samples_dict = {
+            'A': np.array(samples[:N,:]),
+            'B': np.array(samples[N:2*N,:]),
+            'alpha': np.array(samples[2*N:3*N,:])
+        }
+
+        def get_samples(names, start_idx):
+            res = {}
+            for i, name in enumerate(names):
+                res[name] = np.array(samples[start_idx+i,:])
+            return res
+
+        samples_dict.update(get_samples(nld_names, 3*N))
+        samples_dict.update(get_samples(gsf_names, 3*N+N_nld_par))
+        samples_dict.update(get_samples(spc_names, 3*N+N_nld_par+N_gsf_par))
+
+        # Next we need to get the log_likelihood
+        log_like = []
+        for sample in samples.T:
+            log_like.append(lnl(sample))
+        log_like = np.array(log_like)
+        samples = samples_dict
+
+        # Next we need to get the log_likelihood for each sample...
 
         # Format the output
         popt = dict()
@@ -276,30 +322,45 @@ class NormalizerSim(AbstractNormalizer):
             fmts = '\t'.join([fmt + " ± " + fmt])
             vals.append(fmts % (med, sigma))
 
-        return popt, samples
 
-    def slmo_gsf_model(self, E: ndarray,
-                       slmo_mean: float,
-                       slmo_width: Tuple[float, float],
-                       slmo_size: float,
-                       sf_mean: float,
-                       sf_width: float,
-                       sf_size: float,
-                       renorm: float) -> ndarray:
-        """ Calculate the GSF model we have choosen.
+        return popt, samples, log_like
+
+    def estimate_B(self, gsfs: List[Vector], gsf_model, alphas):
+        """ A function that estimates the best guesses for
+        B and alpha.
         """
-        slmo_width, T = slmo_width
-        gsf = self.SLMO(E, slmo_mean, slmo_width, slmo_size, T)
-        gsf += self.SLO(E, sf_mean, sf_width, sf_size)
-        gsf += self.UB_model(E, renorm)
-        return gsf
 
-    def qrpa_gsf_model(self, E: ndarray,
-                       qrpa_renorm: float,
-                       renorm: float) -> ndarray:
-        gsf = self.QRPA_model(E)*qrpa_renorm
-        gsf += self.UB_model(E, 1.0)
-        return gsf
+        # Define the function to maximize
+        Bs = []
+        for gsf, alpha in zip(gsfs, alphas):
+            gsf_new = gsf.copy()
+            gsf_new.to_MeV()
+            model = self.gsf_model.mean(gsf_new.E)
+            normed = np.log(model/gsf_new.values)
+
+            def min_me(B):
+                return np.sum((normed - alpha*gsf_new.E - np.log(B))**2)
+            bounds = [(0, 1e9)]
+            res = differential_evolution(min_me, bounds=bounds)
+            Bs.append(res.x[0])
+        return Bs
+
+    def estimate_alpha(self, nlds: List[Vector], nld_ref: Vector, cut):
+        alphas = []
+        ref = nld_ref.cut(*cut, inplace=False)
+        for nld in nlds:
+            nld_new = nld.copy()
+            nld_new.to_MeV()
+            nld_new.cut(*cut, inplace=True)
+            normed = np.log(ref.values/nld_new.values)
+
+            def min_me(x):
+                A, alpha = x
+                return np.sum((normed - alpha*nld_new.E - np.log(A))**2)
+            bounds = [(0, 1e9), (-10, 10)]
+            res = differential_evolution(min_me, bounds=bounds)
+            alphas.append(res.x[1])
+        return alphas
 
     @staticmethod
     def const_temperature(E: ndarray, T: float, Eshift: float) -> ndarray:
@@ -320,42 +381,6 @@ class NormalizerSim(AbstractNormalizer):
         bsfg = np.exp(2*np.sqrt(a*(E-Eshift)))
         bsfg /= (12.*np.sqrt(2)*sigma*a**(1./4.)*(E-Eshift)**(5./4.))
         return bsfg
-
-    @staticmethod
-    def SLMO(E: ndarray, mean: float, width: float,
-             size: float, T: float) -> ndarray:
-        """ The SLMO model for the gSF"""
-
-        width_ = width*(E/mean + (2*np.pi*T/mean)**2)
-        slmo = 8.6737e-8*size/(1-np.exp(E/T))
-        print(slmo)
-        slmo *= (2./np.pi)*E*width_
-        slmo /= ((E**2 - mean**2)**2 + (E*width_)**2)
-        return slmo
-
-    @staticmethod
-    def SLO(E: ndarray, mean: float, width: float, size: float) -> ndarray:
-        """ The common SLO """
-
-        slo = 8.6737e-8*size*E*width**2
-        slo /= ((E**2 - mean**2)**2 + (E*width)**2)
-        return slo
-
-    @staticmethod
-    def GLO(E: ndarray, mean: float, width: float, size: float,
-            T: float) -> ndarray:
-        """ The generalized Lorentzian of Kopecky and Uhl. """
-
-        # T is the temperature at the final NLD. We could
-        # get this directly from rho, but not now...
-        # For now we will assume constant... :p
-
-        width_ = width*(E**2 + (2*np.pi*T)**2)/mean**2
-        glo = E*width_/((E**2 - mean**2)**2+(E*width_)**2)
-        glo += 0.7*width*(2*np.pi*T)**2/mean**3
-        glo *= 8.6737e-8*size*width
-        return glo
-
 
     @staticmethod
     def GetSpinPrior(norm_pars):
@@ -424,39 +449,6 @@ class NormalizerSim(AbstractNormalizer):
             spinDist += ((2. * j + 1.) / (2. * sigma)
                          * np.exp(-np.power(j + 0.5, 2.) / (2. * sigma)))
         return spinDist  # return 1D if Ex or J is single entry
-
-
-    def UB_model(self, E: ndarray, renorm: float) -> ndarray:
-        """ Model of the upbend. In this case we expect
-        an object that returns the value of the upbend at energy E.
-        """
-        return renorm*self.ub_gen(E)
-
-    def setup_slmo_prior(self, norm_pars):
-        """
-        """
-        # In the following
-        self.gsf_means = np.array([norm_pars.GSFmodelPars['GDR']['E'],
-                                   norm_pars.GSFmodelPars['GDR']['G'],
-                                   norm_pars.GSFmodelPars['GDR']['S'],
-                                   norm_pars.GSFmodelPars['SF']['E'],
-                                   norm_pars.GSFmodelPars['SF']['G'],
-                                   norm_pars.GSFmodelPars['SF']['S']])
-
-        self.gsf_sigmas = np.array([norm_pars.GSFmodelPars['GDR']['E_err'],
-                                   norm_pars.GSFmodelPars['GDR']['G_err'],
-                                   norm_pars.GSFmodelPars['GDR']['S_err'],
-                                   norm_pars.GSFmodelPars['SF']['E_err'],
-                                   norm_pars.GSFmodelPars['SF']['G_err'],
-                                   norm_pars.GSFmodelPars['SF']['S_err']])
-
-    def slmo_prior(self, x: ndarray) -> ndarray:
-        """
-        """
-        x[0:6] = normal(x[0:6], self.gsf_means, self.gsf_sigmas)
-        # x[-1] = uniform(x[-1], 1.0, 2.0)
-        x[-1] = truncnorm(x[-1], 1.0, np.inf, 1.5, 0.5)
-        return x
 
     @property
     def discrete(self) -> Optional[Vector]:
