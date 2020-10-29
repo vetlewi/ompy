@@ -15,6 +15,79 @@ from .models import (ExtrapolationModelLow, ExtrapolationModelHigh,
                      NormalizationParameters)
 
 
+class ensemblelikelihood_nld:
+    def __init__(self, nlds: List[Vector],
+                 nld_limit_low: Tuple[float, float],
+                 nld_limit_high: Tuple[float, float],
+                 nld_ref: Vector, nld_model: Callable[..., ndarray]):
+        """
+        """
+
+        self.N = len(nlds)
+
+        def as_array(vecs, cut=None):
+            if cut is not None:
+                vecs = [vec.cut(*cut, inplace=False) for vec in vecs]
+            E = np.array([vec.E for vec in vecs])
+            values = np.array([vec.values for vec in vecs])
+            stds = []
+            for n, vec in enumerate(vecs):
+                std = vec.std
+                if std is None:
+                    std = 0.3*vec.values
+                stds.append(std)
+            return E, values, np.array(stds)
+
+        def GetSignature(func: Callable[..., any]) -> List[str]:
+            return list(dict(signature(func).parameters).keys())
+
+        nld_low_E, nld_low_v, nld_low_err = as_array(nlds, nld_limit_low)
+        nld_high_E, nld_high_v, nld_high_err = as_array(nlds, nld_limit_high)
+
+        self.A_mask = np.arange(self.N)
+        self.alpha_mask = np.arange(self.N) + self.N
+
+        self.discrete = nld_ref.cut(*nld_limit_low, inplace=False)
+        self.discrete = (self.discrete.values.T*np.ones(nld_low_v.shape))
+
+        self.nld_low_like = OsloNormalLikelihood(x=nld_low_E, y=nld_low_v,
+                                                 yerr=nld_low_err,
+                                                 model=self.discrete_model)
+
+        self.nld_high_like = OsloNormalLikelihood(x=nld_high_E, y=nld_high_v,
+                                                  yerr=nld_high_err,
+                                                  model=nld_model)
+
+        nld_signature = GetSignature(nld_model)
+        del nld_signature[0]
+        self.nld_model_mask = np.arange(len(nld_signature)) + 2*self.N
+
+    def discrete_model(self, x: ndarray, *param) -> ndarray:
+        return self.discrete
+
+    def logp(self, param: ndarray) -> float:
+
+        # We get the parameters
+        A = param[self.A_mask]
+        alpha = param[self.alpha_mask]
+
+        nld_parameters = param[self.nld_model_mask]
+
+        logp = self.nld_low_like(A, alpha)
+        logp += self.nld_high_like(A, alpha, *nld_parameters)
+
+        if logp != logp:
+            return -np.inf
+        return logp
+
+    def loglike(self, cube, ndim, nparams) -> float:
+        param = np.array([cube[i] for i in range(ndim)])
+        return self.logp(param)
+
+    def __call__(self, param) -> float:
+        return self.logp(param)
+
+
 class ensemblelikelihood:
     """ A class that makes stuff work together """
 
@@ -62,7 +135,7 @@ class ensemblelikelihood:
         self.alpha_mask = np.arange(self.N) + 2*self.N
 
         self.discrete = nld_ref.cut(*nld_limit_low, inplace=False)
-        self.discrete = (self.discrete.values.T*np.ones(nld_low_v.shape))
+        self.discrete = self.discrete.values.T*np.ones(nld_low_v.shape)
 
         # Next we setup likelihoods.
         self.nld_low_like = OsloNormalLikelihood(x=nld_low_E, y=nld_low_v,
@@ -129,6 +202,51 @@ class ensemblelikelihood:
         if logp != logp:
             return -np.inf
         return logp
+
+    def logp_pointwise(self, param: ndarray) -> ndarray:
+
+        # We get the parameters
+        A, B = param[self.A_mask], param[self.B_mask]
+        alpha = param[self.alpha_mask]
+
+        nld_parameters = param[self.nld_model_mask]
+        gsf_parameters = param[self.gsf_model_mask]
+
+        logp = [self.nld_low_like.logp_pointwise(A, alpha),
+                self.nld_high_like.logp_pointwise(A, alpha, *nld_parameters),
+                self.gsf_like(B, alpha, *gsf_parameters),
+                self.ext_nld(*nld_parameters),
+                self.ext_gsf(*gsf_parameters)]
+
+        return np.concatenate(logp, axis=None)
+
+    def WIAC(self, samples: ndarray) -> float:
+        """ Compute the widely applicable information criterion of the model.
+        Args:
+            samples: A 2D array with each element along the first axis is the
+                set of samples of the posterior.
+        """
+        logp_pointwise = [self.logp_pointwise(sample) for sample in samples]
+        logp_pointwise = np.array(logp_pointwise)
+
+        # Each row now contains the logp for each observed value.
+        # We want to sum each of the columns.
+
+        lppd = np.sum(np.exp(logp_pointwise), axis=0)
+        lppd = np.sum(np.log(lppd/len(samples)))
+
+        logp_mean = np.mean(logp_pointwise, axis=0, keepdims=True)
+        p_WIAC = np.sum((logp_pointwise - logp_mean)**2, axis=0)
+        p_WIAC = np.sum(p_WIAC/(len(samples) - 1))
+
+        return -2.*lppd + 2*p_WIAC
+
+    def loglike(self, cube, ndim, nparams) -> float:
+        param = np.array([cube[i] for i in range(ndim)])
+        return self.logp(param)
+
+    def __call__(self, param) -> float:
+        return self.logp(param)
 
 
 class EnsembleLikelihood:

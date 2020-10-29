@@ -35,6 +35,9 @@ class Likelihood:
     def logp(self, *param) -> float:
         raise NotImplementedError
 
+    def logp_pointwise(self, *param) -> ndarray:
+        raise NotImplementedError
+
 
 class NormalLikelihood(Likelihood):
 
@@ -58,6 +61,12 @@ class NormalLikelihood(Likelihood):
         logp -= 0.5*error(self.y, self.model(self.x, *model_args), self.yerr)
         return logp
 
+    def logp_pointwise(self, *model_args) -> ndarray:
+        # We expect in this case that the x & y are 1D.
+        logp = np.log(1/(np.sqrt(2*np.pi)*self.yerr))
+        logp -= 0.5*((self.y - self.model(self.x, *model_args))/self.yerr)**2
+        return logp
+
 
 class OsloNormalLikelihood(NormalLikelihood):
 
@@ -67,10 +76,17 @@ class OsloNormalLikelihood(NormalLikelihood):
         norm = (const*np.exp(alpha*self.x.T)).T
         return self.x, self.y*norm, self.yerr*norm
 
-    def logp(self, const: ndarray, alpha: ndarray, *model_args):
+    def logp(self, const: ndarray, alpha: ndarray, *model_args) -> float:
         x, y, yerr = self.transform(const, alpha)
         logp = std_error(yerr)
         logp -= 0.5*error(y, self.model(x, *model_args), yerr)
+        return logp
+
+    def logp_pointwise(self, const: ndarray, alpha: ndarray,
+                       *model_args) -> ndarray:
+        x, y, yerr = self.transform(const, alpha)
+        logp = np.log(1/(np.sqrt(2*np.pi)*yerr))
+        logp -= 0.5*((y - self.model(x, *model_args))/yerr)**2
         return logp
 
 

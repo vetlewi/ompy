@@ -50,8 +50,10 @@ else:
     from .normalizer_gsf import NormalizerGSF
     from .normalizer_simultan import NormalizerSimultan
     from .ensembleNormalizer import EnsembleNormalizer
+    from .stats import *
     from .models import (NormalizationParameters, ResultsNormalized,
                          ExtrapolationModelLow, ExtrapolationModelHigh)
+    from .mod_theano import model_matrix
     from .ensemble_prior import EnsemblePrior
     from .ensemble_likelihood import ensemblelikelihood
     from .introspection import logging, hooks

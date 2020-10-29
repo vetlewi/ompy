@@ -24,18 +24,17 @@ from .abstract_normalizer import AbstractNormalizer
 from .extractor import Extractor
 from .ensemble_likelihood import *
 from .gsf_model import GSFmodel, GSF_model
-from .ensemble_prior import EnsemblePrior
-from .prior import uniform, normal, truncnorm
+from .ensemble_prior import (EnsemblePrior, EnsemblePriorNLD, uniform, cnormal,
+                             normal, truncnorm, exponential)
+
 
 TupleDict = Dict[str, Tuple[float, float]]
 
 
-class NormalizerSim(AbstractNormalizer):
-    """ This is the docstring!
+class NormalizerSep(AbstractNormalizer):
+    """ Normalize first NLD the gSF, use results from
+    NLD as input to gSF, etc.
     """
-
-    LOG = logging.getLogger(__name__)  # overwrite parent variable
-    logging.captureWarnings(True)
 
     def __init__(self, *,
                  extractor: Optional[Extractor] = None,
@@ -56,8 +55,8 @@ class NormalizerSim(AbstractNormalizer):
         self.gsfs = None
 
         if extractor is not None:
-            self.nld = [nld.copy() for nld in extractor.nld]
-            self.gsf = [gsf.copy() for gsf in extractor.gsf]
+            self.nlds = [nld.copy() for nld in extractor.nld]
+            self.gsfs = [gsf.copy() for gsf in extractor.gsf]
 
         try:
             self.nld = self.nlds[0]
@@ -120,10 +119,6 @@ class NormalizerSim(AbstractNormalizer):
             self.path = Path(path)
             self.path.mkdir(exist_ok=True, parents=True)
 
-    def __call__(self, *args, **kwargs) -> any:
-        """ Wrapper for normalize """
-        return self.normalize(*args, **kwargs)
-
     def normalize(self, *, nld_limit_low: Optional[Tuple[float, float]] = None,
                   nld_limit_high: Optional[Tuple[float, float]] = None,
                   gsf_limit_low: Optional[Tuple[float, float]] = None,
@@ -133,7 +128,17 @@ class NormalizerSim(AbstractNormalizer):
                   nlds: Optional[List[Vector]] = None,
                   gsfs: Optional[List[Vector]] = None,
                   ext_logp: Dict[str, ndarray] = None) -> any:
-        """ Docstring!
+        """
+        """
+
+        pass
+
+    def normalize_nld(self,
+                      nld_limit_low: Optional[Tuple[float, float]] = None,
+                      nld_limit_high: Optional[Tuple[float, float]] = None,
+                      discrete: Optional[Vector] = None,
+                      nlds: Optional[List[Vector]] = None) -> any:
+        """ Normalize the NLD.
         """
 
         if not self.regenerate:
@@ -143,99 +148,80 @@ class NormalizerSim(AbstractNormalizer):
             except FileNotFoundError:
                 pass
 
-        # Update state
         self.nld_limit_low = self.self_if_none(nld_limit_low)
         self.nld_limit_high = self.self_if_none(nld_limit_high)
-        self.gsf_limit_low = self.self_if_none(gsf_limit_low)
-        self.gsf_limit_high = self.self_if_none(gsf_limit_high)
-
-        try:
-            ext_logp = self.self_if_none(ext_logp)
-        except ValueError:
-            pass
 
         nld_limit_low = self.nld_limit_low
         nld_limit_high = self.nld_limit_high
-        gsf_limit_low = self.gsf_limit_low
-        gsf_limit_high = self.gsf_limit_high
 
         discrete = self.self_if_none(discrete)
-        shell_model = self.self_if_none(shell_model)
-        shell_model.to_MeV()
         discrete.to_MeV()
 
         self.nlds = self.self_if_none(nlds)
-        self.gsfs = self.self_if_none(gsfs)
 
         nlds = [nld.copy() for nld in self.nlds]
-        gsfs = [gsf.copy() for gsf in self.gsfs]
 
-        for nld, gsf in zip(nlds, gsfs):
+        for nld in nlds:
             nld.to_MeV()
-            gsf.to_MeV()
 
-        # We determine the number of NLD model parameters
         N = len(nlds)
         nld_sig = list(dict(signature(self.nld_model).parameters).keys())
-        gsf_sig = []
-        if isinstance(self.gsf_model, GSFmodel):
-            gsf_sig = self.gsf_model.par_names
-        else:
-            gsf_sig = list(dict(signature(self.gsf_model).parameters).keys())
-
-        if 'T' in nld_sig and 'T' in gsf_sig:
-            del gsf_sig[gsf_sig.index('T')]
-            self.LOG.info("Temperature parameter 'T' in gSF model derived from NLD model.")
 
         N_nld_par = len(nld_sig)-1
-        N_gsf_par = len(gsf_sig)-1
         nld_names = nld_sig[1:N_nld_par+1]
-        gsf_names = gsf_sig[1:N_gsf_par+1]
-        Nvars = 3*N + N_nld_par + N_gsf_par
+        Nvars = 2*N + N_nld_par
 
         names = ['A[%d]' % i for i in range(N)]
-        names += ['B[%d]' % i for i in range(N)]
-        names += ['α[%d]' % i for i in range(N)]
-        names += nld_names + gsf_names
+        names += ['alpha[%d]' % i for i in range(N)]
+        names += nld_names
 
-        lnl = ensemblelikelihood(nlds=nlds, gsfs=gsfs,
-                                 nld_limit_low=nld_limit_low,
-                                 nld_limit_high=nld_limit_high,
-                                 gsf_limit=gsf_limit_high,
-                                 nld_ref=discrete,
-                                 nld_model=self.nld_model,
-                                 gsf_model=self.gsf_model,
-                                 ext_gsf=ext_logp)
+        likelihood = ensemblelikelihood_nld(nlds=nlds,
+                                            nld_limit_low=nld_limit_low,
+                                            nld_limit_high=nld_limit_high,
+                                            nld_ref=discrete,
+                                            nld_model=self.nld_model)
 
-        alphas = self.estimate_alpha(nlds, discrete, nld_limit_low)
-        xs = self.estimate_B(gsfs, self.gsf_model, alphas)
+        # First we will find the global minima
+        limits = [[0, 10] for i in range(N)]  # A parameter
+        limits += [[-10., 10.] for i in range(N)]  # alpha parameter
+        limits += [[0, 10], [-10., 10.]]  # Same for bsfg and ct
 
-        Bmean = np.log10(np.array(xs))
+        res = differential_evolution(lambda par: -likelihood(par),
+                                     bounds=limits)
 
-        res = self.initial_guess(lnl, N, N_nld_par, N_gsf_par, self.nld_prior,
-                                 self.gsf_prior)
+        # With the result we can easily set the priors!
+        print(res)
 
-        # We want to print only 5 and 5 parameters at a time.
-        self.LOG.info("DE results:")
-        norm_values = [[res[i], res[i+N], res[i+2*N]] for i in range(N)]
-        self.LOG.info('\n%s', tt.to_string(norm_values,
-                                           header=['A', 'B', 'α']))
-        self.write_log(names[3*N:], res[3*N:])
+        A_mean = np.array(res.x[0:N])
+        alpha_mean = np.array(res.x[N:2*N])
+        param_mean = np.array(res.x[2*N:2*N+N_nld_par])
 
-        A_est = np.log(res[0])
-        B_est = np.log(res[1])
+        class prior_trunc:
+            def __init__(self, loc, scale=None, lower=0., upper=np.inf):
+                self.loc = np.array(loc)
+                self.scale = 10*np.abs(self.loc) if scale is None else scale
+                self.lower = np.array(lower)
+                self.upper = np.array(upper)
 
-        def const_prior(x):
-            return 10**uniform(x, 0, 4)
+            def __call__(self, p):
+                return truncnorm(p, lower=self.lower, upper=self.upper,
+                                 loc=self.loc, scale=self.scale)
 
-        # To get a prior for the gSF, we find the best value of B using only the priors
+        class prior_normal:
+            def __init__(self, loc, scale=None):
+                self.loc = np.array(loc)
+                self.scale = 10*np.abs(self.loc) if scale is None else scale
 
-        prp = EnsemblePrior(A=lambda x: np.exp(normal(x, A_est, A_est)),
-                            B=lambda x: np.exp(normal(x, B_est, 3*B_est)),
-                            alpha=lambda x: normal(x, 0, 1),
-                            nld_param=self.nld_prior, gsf_param=self.gsf_prior,
-                            spc_param=lambda x: 0, N=N, N_nld_par=N_nld_par,
-                            N_gsf_par=N_gsf_par, N_spc_par=0)
+            def __call__(self, p):
+                return normal(p, loc=self.loc, scale=self.scale)
+
+        prior_A = prior_trunc(A_mean)
+        prior_alpha = prior_normal(alpha_mean)
+        prior_param = prior_trunc(param_mean, lower=[0., -np.inf],
+                                  upper=[np.inf, np.inf])
+
+        prior = EnsemblePriorNLD(A=prior_A, alpha=prior_alpha,
+                                 nld_param=prior_param, N=N, N_nld=N_nld_par)
 
         self.multinest_path.mkdir(exist_ok=True)
         path = self.multinest_path / f"norm_"
@@ -248,7 +234,7 @@ class NormalizerSim(AbstractNormalizer):
                                       else None)
 
         with redirect_stdout(self.LOG):
-            pymultinest.run(lnl.loglike, prp.prior, Nvars,
+            pymultinest.run(likelihood.loglike, prior.prior, Nvars,
                             outputfiles_basename=str(path),
                             **self.multinest_kwargs)
 
@@ -263,8 +249,7 @@ class NormalizerSim(AbstractNormalizer):
 
         samples_dict = {
             'A': np.array(samples[:N, :]),
-            'B': np.array(samples[N:2*N, :]),
-            'alpha': np.array(samples[2*N:3*N, :])
+            'alpha': np.array(samples[N:2*N, :])
         }
 
         def get_samples(names, start_idx):
@@ -273,13 +258,12 @@ class NormalizerSim(AbstractNormalizer):
                 res[name] = np.array(samples[start_idx+i, :])
             return res
 
-        samples_dict.update(get_samples(nld_names, 3*N))
-        samples_dict.update(get_samples(gsf_names, 3*N+N_nld_par))
+        samples_dict.update(get_samples(nld_names, 2*N))
 
         # Next we need to get the log_likelihood
         log_like = []
         for sample in samples.T:
-            log_like.append(lnl(sample))
+            log_like.append(likelihood(sample))
         log_like = np.array(log_like)
         samples = samples_dict
 
@@ -302,105 +286,11 @@ class NormalizerSim(AbstractNormalizer):
             fmts = '\t'.join([fmt + " ± " + fmt])
             vals.append(fmts % (med, sigma))
 
-        # First 3*N are norm parameters
-        norm_values = [[vals[i], vals[i+N], vals[i+2*N]] for i in range(N)]
-        self.LOG.info("Multinest results:\n%s",
-                      tt.to_string(norm_values, header=['A', 'B', 'α']))
-        self.write_log(names[3*N:], vals[3*N:])
-
         self.samples = samples
         self.popt = popt
         self.log_like = log_like
 
-        return popt, samples, log_like, lnl
-
-    def initial_guess(self, likelihood, N, N_nld, N_gsf, nld_prior, gsf_prior):
-
-        bounds = [[0, 5] for n in range(N)]
-        bounds += [[0, 5000] for n in range(N)]
-        bounds += [[-10., 10.] for n in range(N)]
-
-        nld_low = nld_prior(np.repeat(0.04, N_nld))
-        nld_high = nld_prior(np.repeat(0.96, N_nld))
-        bounds += [[low, high] for low, high in zip(nld_low, nld_high)]
-
-        gsf_low = gsf_prior(np.repeat(0.04, N_gsf))
-        gsf_high = gsf_prior(np.repeat(0.96, N_gsf))
-        bounds += [[low, high] for low, high in zip(gsf_low, gsf_high)]
-
-        # Now, we can try to normalize!
-        res = differential_evolution(lambda x: -likelihood(x), bounds=bounds)
-        return res.x
-
-    def estimate_B(self, gsfs: List[Vector], gsf_model, alphas):
-        """ A function that estimates the best guesses for
-        B and alpha.
-        """
-
-        # Define the function to maximize
-        Bs = []
-        for gsf, alpha in zip(gsfs, alphas):
-            gsf_new = gsf.copy()
-            gsf_new.to_MeV()
-            model = gsf_model.mean(gsf_new.E)
-            normed = np.log(model/gsf_new.values)
-
-            def min_me(B):
-                return np.sum((normed - alpha*gsf_new.E - np.log(B))**2)
-            bounds = [(0, 1e9)]
-            res = differential_evolution(min_me, bounds=bounds)
-            Bs.append(res.x[0])
-        return Bs
-
-    def estimate_alpha(self, nlds: List[Vector], nld_ref: Vector, cut):
-        alphas = []
-        ref = nld_ref.cut(*cut, inplace=False)
-        for nld in nlds:
-            nld_new = nld.copy()
-            nld_new.to_MeV()
-            nld_new.cut(*cut, inplace=True)
-            normed = np.log(ref.values/nld_new.values)
-
-            def min_me(x):
-                A, alpha = x
-                return np.sum((normed - alpha*nld_new.E - np.log(A))**2)
-            bounds = [(0, 1e9), (-10, 10)]
-            res = differential_evolution(min_me, bounds=bounds)
-            alphas.append(res.x[1])
-        return alphas
-
-    def plot(self, *, ax: Tuple[Any, Any] = None,
-             add_label: bool = True,
-             add_figlegend: bool = True,
-             plot_fitregion: bool = True,
-             reset_color_cycle: bool = True,
-             **kwargs) -> Tuple[Any, Any]:
-        """
-        """
-        # Setup figure
-
-        if ax is None:
-            fig, ax = plt.subplots(1, 2, constrained_layout=True)
-        else:
-            fig = ax[0].figure
-
-        # First we will plot NLD.
-        ax[0].set_title('Level density')
-        ax[1].set_title('$\gamma$SF')
-
-        self.plot_nld(ax=ax[0], add_label=add_label,
-                      plot_fitregion=plot_fitregion,
-                      add_figlegend=add_figlegend)
-        self.plot_gsf(ax=ax[1], add_label=add_label,
-                      plot_fitregion=plot_fitregion,
-                      add_figlegend=add_figlegend)
-
-        ax[0].set_yscale('log')
-        ax[1].set_yscale('log')
-
-        #ax[0].legend(loc='best')
-
-        return fig, ax
+        return popt, samples, log_like
 
     def plot_nld(self, ax: Any = None, add_label: bool = True,
                  plot_fitregion: bool = True,
@@ -459,71 +349,8 @@ class NormalizerSim(AbstractNormalizer):
         ax.set_xlabel(r"Excitation energy $E_x~[\mathrm{MeV}]$")
         ax.set_ylim(bottom=0.5/(nld_median.E[1]-nld_median.E[0]))
 
-        #if fig is not None and add_figlegend:
-        #    fig.legend(loc=9, ncol=3, frameon=False)
-
-    def plot_gsf(self, ax: Any = None, add_label: bool = True,
-                 plot_fitregion: bool = True,
-                 add_figlegend: bool = True) -> None:
-        fig = None
-        if ax is None:
-            fig, ax = plt.subplots()
-        else:
-            fig = ax.figure
-
-        median_kwargs = {'kind': 'line', 'scale': 'log'}
-        model_kwargs = {'kind': 'line', 'scale': 'log', 'marker': ''}
-        std_kwargs = {'alpha': 0.3}
-        model_std_kwargs = {'alpha': 0.2}
-        sm_kwars = {'kind': 'step', 'scale': 'log'}
-        ext_kwargs = {'markersize': 3, 'marker': 'd', 'linestyle': ''}
-        if add_label:
-            median_kwargs['label'] = 'Exp.'
-            std_kwargs['label'] = 'Exp. 68 %'
-            model_kwargs['label'] = "Model"
-            model_std_kwargs['label'] = "Model ±" + "68 %"
-            sm_kwars['label'] = "ca48mh1g"
-            if self.ext_logp is not None:
-                try:
-                    ext_kwargs['label'] = self.ext_logp['label']
-                except KeyError:
-                    ext_kwargs['label'] = 'Ext. data'
-
-        gsf_median, gsf_low, gsf_high = self.get_gsf([0.16, 0.84])
-        gsf_median.plot(ax=ax, **median_kwargs)
-        ax.fill_between(gsf_median.E, gsf_low.values,
-                        gsf_high.values, **std_kwargs)
-
-        max_E = [max(gsf_median.E)]
-        if self.ext_logp is not None:
-            max_E.append(max(self.ext_logp['x']))
-
-        E_model = np.linspace(0, max(max_E), 1001)
-        model_median, model_low, model_high = self.get_gsf_model(E_model)
-        model_median.plot(ax=ax, **model_kwargs)
-        ax.fill_between(E_model, model_low.values, model_high.values,
-                        **model_std_kwargs)
-
-        self.shell_model.plot(ax=ax, **sm_kwars)
-
-        # Next external data!
-        if self.ext_logp is not None:
-            ax.errorbar(self.ext_logp['x'], self.ext_logp['y'],
-                        yerr=self.ext_logp['yerr'], **ext_kwargs)
-
-        if plot_fitregion:
-            ax.axvspan(self.gsf_limit_high[0], self.gsf_limit_high[1],
-                       color='grey', alpha=0.1, label="fit limits")
-
-        ax.set_yscale('log')
-        ax.set_xlabel(rf"$\gamma$-ray energy $E_\gamma$~[MeV]")
-        ax.set_ylabel(rf"$\gamma$-SF f($E_\gamma$)~[MeV$^{{-3}}$]")
-        ax.set_ylim(bottom=1e-9)
-
         if fig is not None and add_figlegend:
             fig.legend(loc=9, ncol=3, frameon=False)
-
-        return fig, ax
 
     def get_normalized(self, vecs: List[Vector], const: ndarray,
                        slope: ndarray, q: Tuple[float, float]
@@ -533,20 +360,16 @@ class NormalizerSim(AbstractNormalizer):
                           values=np.quantile(data, q, axis=(1, 2)),
                           units='MeV')
 
-        E, values, stds = [], [], []
+        E, values = [], []
         for vec in vecs:
             vec_ = vec.copy()
             vec_.to_MeV()
             E.append(vec_.E)
             values.append(vec_.values)
-            stds.append(vec_.std/vec_.values)
-        E, values, stds = np.array(E), np.array(values), np.array(stds)
+        E, values = np.array(E), np.array(values)
         normed = self.transform(E, values, const, slope)
 
         median = To_Vector(E, normed, 0.5)
-        median.std = stds[0]**2
-        median.std += (normed.std(axis=(1, 2))/normed.mean(axis=(1, 2)))**2
-        median.std = np.sqrt(median.std)*median.values
         low = To_Vector(E, normed, q[0])
         high = To_Vector(E, normed, q[1])
         return median, low, high
@@ -558,16 +381,8 @@ class NormalizerSim(AbstractNormalizer):
 
         assert self.samples is not None, \
             "Normalization has not yet been ran."
-
+        
         return self.get_normalized(self.nlds, self.samples['A'],
-                                   self.samples['alpha'], q)
-
-    def get_gsf(self, q: Tuple[float, float] = (0.16, 0.84)
-                ) -> Tuple[Vector, Vector, Vector]:
-        assert self.samples is not None, \
-            "Normalization has not yet been ran."
-
-        return self.get_normalized(self.gsfs, self.samples['B'],
                                    self.samples['alpha'], q)
 
     def get_nld_model(self, E: ndarray,
@@ -579,31 +394,6 @@ class NormalizerSim(AbstractNormalizer):
             "Normalization has not yet been ran."
 
         return self.evaluate_model(E, self.nld_model, self.samples, q)
-
-    def get_gsf_model(self, E: ndarray,
-                      q: Tuple[float, float] = (0.16, 0.84)
-                      ) -> Tuple[Vector, Vector, Vector]:
-        """
-        """
-        assert self.samples is not None, \
-            "Normalization has not yet been ran."
-
-        return self.evaluate_model(E, self.gsf_model, self.samples, q)
-
-    def write_log(self, names, values, size=5):
-        def flush_log(names, values):
-            self.LOG.info("\n%s", tt.to_string([values], header=header))
-
-        header = []
-        table = []
-        for name, value in zip(names, values):
-            if len(header) == size:
-                flush_log(header, table)
-                header = []
-                table = []
-            header.append(name)
-            table.append(value)
-        flush_log(header, table)
 
     @staticmethod
     def evaluate_model(E: ndarray, model: Callable[..., ndarray],

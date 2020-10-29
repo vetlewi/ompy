@@ -1,9 +1,38 @@
 import numpy as np
+import numba as nb
 from numpy import ndarray
 from scipy import stats
 from typing import Optional, Tuple, Any, Union, Callable, Dict, List, Sequence
 
 from .vector import Vector
+
+class EnsemblePriorNLD:
+
+    def __init__(self, A: Callable[..., any],
+                 alpha: Callable[..., any],
+                 nld_param: Callable[..., any],
+                 N: int, N_nld: int) -> None:
+        """
+        """
+
+        self.A, self.alpha = A, alpha
+        self.nld_param = nld_param
+        self.N, self.N_nld = N, N_nld
+
+    def __call__(self, param):
+        return self.evaluate(param)
+
+    def prior(self, cube, ndim, nparam):
+        set_par(cube, self.evaluate(cube))
+
+    def evaluate(self, param):
+        N, N_nld = self.N, self.N_nld
+
+        pars = np.array(param[0:2*N+N_nld])
+        pars[0:N] = self.A(pars[0:N])
+        pars[N:2*N] = self.alpha(pars[N:2*N])
+        pars[2*N:2*N+N_nld] = self.nld_param(pars[2*N:2*N+N_nld])
+        return pars
 
 
 class EnsemblePrior:
@@ -50,44 +79,6 @@ class EnsemblePrior:
         pars[3*N+Nnld+Ngsf:3*N+Nnld+Ngsf+Nspc] =\
             self.spc_param(pars[3*N+Nnld+Ngsf:3*N+Nnld+Ngsf+Nspc])
         return pars
-
-
-def uniform(x: Union[float, ndarray], lower: Union[float, ndarray] = 0,
-            upper: Union[float, ndarray] = 1) -> Union[float, ndarray]:
-    """ Transforms a random number from a uniform PDF between
-    0 and 1 to a uniform distribution between lower and upper.
-    """
-    return x*(upper-lower) + lower
-
-
-def normal(x:  Union[float, ndarray], loc: Union[float, ndarray] = 0.,
-           scale: Union[float, ndarray] = 1.) -> Union[float, ndarray]:
-    return stats.norm.ppf(x, loc=loc, scale=scale)
-
-
-class cnormal:
-    def __init__(loc: Union[float, ndarray] = 0,
-                 scale: Union[float, ndarray] = 1):
-        self.loc = loc if isinstance(loc, float) else loc.copy()
-        self.scale = scale if isinstance(scale, float) else scale.copy()
-
-    def __call__(x: Union[float, ndarray]) -> Union[float, ndarray]:
-        return stats.norm.ppf(x, loc=self.loc, scale=self.scale)
-
-
-def exponential(x: Union[float, ndarray],
-                scale: Union[float, ndarray] = 1.0) -> Union[float, ndarray]:
-    return -np.log(1-x)*scale
-
-
-def truncnorm(x: Union[float, ndarray], lower: Union[float, ndarray],
-              upper: Union[float, ndarray], loc: Union[float, ndarray],
-              scale: Union[float, ndarray]) -> Union[float, ndarray]:
-    """ Wrapper for the scipy stats norm ppf.
-    """
-    a = (lower - loc)/scale
-    b = (upper - loc)/scale
-    return stats.truncnorm.ppf(x, a, b, loc, scale)
 
 
 def set_par(cube, values):

@@ -5,7 +5,7 @@ from typing import Optional, Tuple, Any, Union, Callable, Dict, List, Sequence
 from inspect import signature
 
 
-from .ensemble_prior import normal
+from .prior import normal
 
 
 class GSF_model:
@@ -16,12 +16,22 @@ class GSF_model:
         # First we expect
         self.mu = []
         self.sigma = []
+        self.need_T = False
         for res_key in priors:
             for par_key in priors[res_key]:
+                if par_key == 'T' and priors[res_key][par_key] is None:
+                    self.need_T = True
+                    continue
                 self.mu.append(priors[res_key][par_key]['mu'])
                 self.sigma.append(priors[res_key][par_key]['sigma'])
         self.mu = np.array(self.mu)
         self.sigma = np.array(self.sigma)
+
+    def mean(self, E):
+        args = list(self.mu)
+        if self.need_T:
+            args.insert(3, 0.8)
+        return self.__call__(E, *args)
 
     def prior(self, x: Sequence) -> Sequence:
         x = normal(x, self.mu, self.sigma)
@@ -29,6 +39,80 @@ class GSF_model:
 
     def __call__(self, *args) -> ndarray:
         raise NotImplementedError
+
+
+class With_UB(GSF_model):
+    def __init__(self, priors, upbend):
+        super().__init__(priors=priors)
+        self.upbend = upbend
+
+
+class GLO_model(With_UB):
+    def __call__(self, E, gdr_mean, gdr_width, gdr_size, T,
+                 pdr_mean, pdr_width, pdr_size,
+                 sf_mean, sf_width, sf_size, sm_scale):
+        gsf = GSFmodel.GLO(E, gdr_mean, gdr_width, gdr_size, T)
+        gsf += GSFmodel.SLO(E, pdr_mean, pdr_width, pdr_size)
+        gsf += GSFmodel.SLO(E, sf_mean, sf_width, sf_size)
+        gsf += self.upbend(E)*sm_scale
+        return gsf
+
+
+class EGLO_model(With_UB):
+    def __call__(self, E, gdr_mean, gdr_width, gdr_size, T,
+                 pdr_mean, pdr_width, pdr_size,
+                 sf_mean, sf_width, sf_size, sm_scale):
+        gsf = GSFmodel.EGLO_const_k(E, gdr_mean, gdr_width, gdr_size, T)
+        gsf += GSFmodel.SLO(E, pdr_mean, pdr_width, pdr_size)
+        gsf += GSFmodel.SLO(E, sf_mean, sf_width, sf_size)
+        gsf += self.upbend(E)*sm_scale
+        return gsf
+
+
+class SMLO_model(With_UB):
+    #def mean(self, E):
+    #    args = list(self.mu)
+    #    return self.__call__(E, *args)
+
+    def __call__(self, E, gdr_mean, gdr_width, gdr_size, T,
+                 pdr_mean, pdr_width, pdr_size,
+                 sf_mean, sf_width, sf_size, sm_scale):
+        gsf = GSFmodel.SMLO(E, gdr_mean, gdr_width, gdr_size, T)
+        gsf += GSFmodel.SLO(E, pdr_mean, pdr_width, pdr_size)
+        gsf += GSFmodel.SLO(E, sf_mean, sf_width, sf_size)
+        gsf += self.upbend(E)*sm_scale
+        return gsf
+
+
+class Interpolated_model(With_UB):
+    def __init__(self, priors, upbend, gdr):
+        super().__init__(priors=priors, upbend=upbend)
+        self.gdr = gdr
+
+    def __call__(self):
+        raise NotImplementedError
+
+
+class QRPA_model(Interpolated_model):
+    def __call__(self, E, gdr_scale, gdr_shift,
+                 pdr_mean, pdr_width, pdr_size,
+                 sf_mean, sf_width, sf_size,
+                 sm_scale):
+        gsf = self.gdr(E-gdr_shift)*gdr_scale
+        gsf += GSFmodel.SLO(E, pdr_mean, pdr_width, pdr_size)
+        gsf += GSFmodel.SLO(E, sf_mean, sf_width, sf_size)
+        gsf += self.upbend(E)*sm_scale
+        return gsf
+
+
+class QTBA_model(Interpolated_model):
+    def __call__(self, E, gdr_scale, gdr_shift,
+                 sf_mean, sf_width, sf_size,
+                 sm_scale):
+        gsf = self.gdr(E-gdr_shift)*gdr_scale
+        gsf += GSFmodel.SLO(E, sf_mean, sf_width, sf_size)
+        gsf += self.upbend(E)*sm_scale
+        return gsf
 
 
 class GSFmodel:
@@ -151,6 +235,34 @@ class GSFmodel:
             T: Temperature of the final level in [MeV]
         Returns: Gamma ray strength [MeV^(-3)]
         """
+
+        def K(e: ndarray) -> ndarray:
+            return 1 + (1-k)*(e - 4.5)/(mean - 4.5)
+
+        def Width(e: ndarray, t: float) -> ndarray:
+            return K(e)*width*((e/mean)**2 + (2*np.pi*t/mean)**2)
+
+        eglo = 0.7*Width(0, T)/mean**3
+        eglo += E*Width(E, T)/((E**2 - mean**2)**2 + (E*Width(E, T))**2)
+        eglo *= 8.6737e-8*size*width
+        return eglo
+
+    @staticmethod
+    @nb.jit(nopython=True)
+    def EGLO_const_k(E: ndarray, mean: float, width: float,
+                     size: float, T: float) -> ndarray:
+        """ The enhanced Generalized Lorentzian model.
+
+        Args:
+            E: Gamma ray energy in [MeV]
+            mean: Mean position of the resonance in [MeV]
+            width: Width of the resonance in [MeV]
+            size: Total cross-section in [mb]
+            T: Temperature of the final level in [MeV]
+        Returns: Gamma ray strength [MeV^(-3)]
+        """
+
+        k = 1.0
 
         def K(e: ndarray) -> ndarray:
             return 1 + (1-k)*(e - 4.5)/(mean - 4.5)
