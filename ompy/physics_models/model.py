@@ -3,19 +3,20 @@ from numpy import ndarray
 from typing import Optional, Tuple, Any, Union, Callable, Dict, List, Sequence
 
 
-def model:
+class model:
     """ Parent class for all derived models.
 
     Attributes:
         name: Name of the model
 
     """
-    def __init__(self, name: str):
+    def __init__(self, name: str, N_free: int):
         """ Setup name
         Args:
             name: Name of the model (str)
         """
         self.name = name
+        self.N_free = N_free
 
     def prior(self, param: ndarray) -> ndarray:
         """ Convert from unit cube to parameter cube.

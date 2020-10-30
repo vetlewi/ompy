@@ -48,6 +48,7 @@ else:
     from .normalizer_pymc import NormalizerPYMC
     from .normalizer_sim import NormalizerSim
     from .normalizer_gsf import NormalizerGSF
+    from .normalizer_sim_tmp import NormalizerSim_tmp
     from .normalizer_simultan import NormalizerSimultan
     from .ensembleNormalizer import EnsembleNormalizer
     from .stats import *
@@ -56,7 +57,8 @@ else:
     from .mod_theano import model_matrix
     from .ensemble_prior import EnsemblePrior
     from .ensemble_likelihood import ensemblelikelihood
+    from .likelihood import OsloNormalLikelihood
     from .introspection import logging, hooks
+    from .physics_models import *
     from .gsf_model import *
     from .likelihood import Likelihood, NormalLikelihood, OsloNormalLikelihood
-    #from .distributions import SMLO, SLO

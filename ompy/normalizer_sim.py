@@ -56,8 +56,8 @@ class NormalizerSim(AbstractNormalizer):
         self.gsfs = None
 
         if extractor is not None:
-            self.nld = [nld.copy() for nld in extractor.nld]
-            self.gsf = [gsf.copy() for gsf in extractor.gsf]
+            self.nlds = [nld.copy() for nld in extractor.nld]
+            self.gsfs = [gsf.copy() for gsf in extractor.gsf]
 
         try:
             self.nld = self.nlds[0]

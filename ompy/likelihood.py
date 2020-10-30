@@ -7,16 +7,13 @@ from typing import Optional, Tuple, Any, Union, Callable, Dict, List, Sequence
 import scipy.stats as stats
 import matplotlib.pyplot as plt
 
-from .vector import Vector
-from .library import log_interp1d
-from .gsf_model import GSFmodel
-from .models import (ExtrapolationModelLow, ExtrapolationModelHigh,
-                     NormalizationParameters)
+from .physics_models import model as phmodel
 
 
 class Likelihood:
 
-    def __init__(self, x: ndarray, y: ndarray, model: Callable[..., ndarray]):
+    def __init__(self, x: ndarray, y: ndarray,
+                 model: Union[Callable[..., ndarray], phmodel]):
         """
         Args:
             x: predictor
@@ -41,8 +38,9 @@ class Likelihood:
 
 class NormalLikelihood(Likelihood):
 
-    def __init__(self, x: ndarray, y: ndarray, model: Callable[..., ndarray],
-                 yerr: Union[float, ndarray] = 0.3):
+    def __init__(self, x: ndarray, y: ndarray,
+                 model: Union[Callable[..., ndarray], phmodel],
+                 yerr: Optional[Union[float, ndarray]] = None):
         """
         Args:
             x: predictor
@@ -53,6 +51,8 @@ class NormalLikelihood(Likelihood):
 
         super().__init__(x=x,  y=y, model=model)
 
+        if yerr is None:
+            self.yerr = 0.3*self.y
         self.yerr = yerr if isinstance(yerr, ndarray) else yerr*y
         self.yerr = np.array(self.yerr)
 
@@ -76,8 +76,9 @@ class OsloNormalLikelihood(NormalLikelihood):
         norm = (const*np.exp(alpha*self.x.T)).T
         return self.x, self.y*norm, self.yerr*norm
 
-    def logp(self, const: ndarray, alpha: ndarray, *model_args) -> float:
+    def logp(self, const: float, alpha: float, *model_args) -> float:
         x, y, yerr = self.transform(const, alpha)
+        #print(((y-self.model(x, *model_args))/yerr)**2)
         logp = std_error(yerr)
         logp -= 0.5*error(y, self.model(x, *model_args), yerr)
         return logp
