@@ -6,6 +6,10 @@ Changes:
 - Reimplemented PPF for normal distribution and truncated normal distribution in C++ for improved performance (about 300% faster than the SciPy implementation!).
 - Added `evidence` attribute to the `ResultsNormalized` class such that the global evidence of the Bayesian fit
   are stored with the results.
+- Changed the way the `Extractor` class are called. The ensamble and trapezoid are no longer given in the
+  constructor, but are mandatory arguments in the `extract_from()` method. The class also now uses the same
+  convention for loading and saving from file as the `Vector` and `Matrix` classes.
+- Initial work to unify the way objects are saved/loaded from disk.
 
 ## v.1.1.0
 Most important changes:
