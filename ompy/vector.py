@@ -13,7 +13,7 @@ from .filehandling import (load_numpy_1D, save_numpy_1D,
                            filetype_from_suffix,
                            load_tar, save_tar)
 from .decomposition import index
-from .library import div0
+from .library import div0, log_interp1d
 from .rebin import rebin_1D
 from .abstractarray import AbstractArray
 
@@ -100,6 +100,9 @@ class Vector(AbstractArray):
 
         if check_equidistant:
             self.verify_equdistant(axis="x")
+
+    def interpolate(self, **kwargs):
+        return log_interp1d(self.E, self.values, **kwargs)
 
     def calibration(self) -> Dict[str, float]:
         """Calculate and return the calibration coefficients of the energy axes
@@ -548,3 +551,7 @@ class Vector(AbstractArray):
 
         result.values = result.values@other.values
         return result
+
+    def __len__(self):
+        assert len(self.E) == len(self.values)
+        return len(self.E)
