@@ -85,13 +85,13 @@ ENV XDG_CACHE_HOME="/home/${NB_USER}/.cache/"
 RUN MPLBACKEND=Agg python -c "import matplotlib.pyplot" && \
     fix-permissions "/home/${NB_USER}"
 
-RUN pip install watermark tqdm==4.35.0 pymc3
+RUN pip install watermark tqdm pymc3
 
 workdir /
-RUN git clone --recursive https://github.com/oslocyclotronlab/ompy.git
+RUN git clone --recursive https://github.com/vetlewi/ompy.git
 WORKDIR /ompy
+RUN git checkout -t origin/IS559
 RUN pip install .
-RUN pip install watermark 
 
 ENV LD_LIBRARY_PATH="/usr/local/lib"
 
