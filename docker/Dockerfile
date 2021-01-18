@@ -87,10 +87,18 @@ RUN MPLBACKEND=Agg python -c "import matplotlib.pyplot" && \
 
 RUN pip install watermark tqdm pymc3
 
-workdir /
+WORKDIR /
 RUN git clone --recursive https://github.com/vetlewi/ompy.git
 WORKDIR /ompy
 RUN git checkout -t origin/IS559
+#ADD "https://www.random.org/cgi-bin/randbyte?nbytes=10&format=h" skipcache
+RUN git pull
+RUN pip install .
+
+WORKDIR /
+ADD ./extompy /extompy
+WORKDIR /extompy
+RUN ls -las
 RUN pip install .
 
 ENV LD_LIBRARY_PATH="/usr/local/lib"

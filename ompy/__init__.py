@@ -27,7 +27,8 @@ else:
 
     # Simply import all functions and classes from all files to make them
     # available at the package level
-    from .library import div0, fill_negative_gauss, fill_negative_max
+    from .library import (div0, fill_negative_gauss, fill_negative_max,
+                          log_interp1d)
     from .spinfunctions import SpinFunctions
     from .abstractarray import AbstractArray
     from .matrix import Matrix, ZerosMatrix
@@ -49,3 +50,5 @@ else:
     from .ensembleNormalizer import EnsembleNormalizer
     from .models import NormalizationParameters, ResultsNormalized
     from .introspection import logging, hooks
+
+    from extompy import *
