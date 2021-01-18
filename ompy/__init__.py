@@ -50,5 +50,3 @@ else:
     from .ensembleNormalizer import EnsembleNormalizer
     from .models import NormalizationParameters, ResultsNormalized
     from .introspection import logging, hooks
-
-    from extompy import *
