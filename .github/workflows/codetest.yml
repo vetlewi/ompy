@@ -32,7 +32,7 @@ jobs:
           mkdir ${DEPS_DIR} && cd ${DEPS_DIR}
           git clone https://github.com/JohannesBuchner/MultiNest.git
           cd ${DEPS_DIR}/MultiNest/build && cmake .. && make && sudo make install
-          echo '::set-env name=LD_LIBRARY_PATH::${DEPS_DIR}/MultiNest/build:${LD_LIBRARY_PATH}'
+          echo "LD_LIBRARY_PATH=${DEPS_DIR}/MultiNest/build:${LD_LIBRARY_PATH}" >> $GITHUB_ENV
 
       - name: Install dependencies
         run: |
