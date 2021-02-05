@@ -26,13 +26,12 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       
-      - name: Install MultiNest
+      - name: Build and install MultiNest
         run: |
-          echo "${GITHUB_WORKSPACE}/deps" >> $GITHUB_ENV
+          DEPS_DIR="${GITHUB_WORKFLOW}/deps"
           mkdir ${DEPS_DIR} && cd ${DEPS_DIR}
           git clone https://github.com/JohannesBuchner/MultiNest.git
-          cd ${DEPS_DIR}/MultiNest/build && cmake .. && make && cd ${GITHUB_WORKSPACE}
-          echo "LD_LIBRARY_PATH=${DEPS_DIR}/MultiNest/lib:${{env.LD_LIBRARY_PATH}}" >> $GITHUB_ENV
+          cd ${DEPS_DIR}/MultiNest/build && cmake .. && make && sudo make install
 
       - name: Install dependencies
         run: |
