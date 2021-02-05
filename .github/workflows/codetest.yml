@@ -28,7 +28,7 @@ jobs:
       
       - name: Build and install MultiNest
         run: |
-          DEPS_DIR="${GITHUB_WORKFLOW}/deps"
+          DEPS_DIR="${GITHUB_WORKSPACE}/deps"
           mkdir ${DEPS_DIR} && cd ${DEPS_DIR}
           git clone https://github.com/JohannesBuchner/MultiNest.git
           cd ${DEPS_DIR}/MultiNest/build && cmake .. && make && sudo make install
