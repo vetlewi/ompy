@@ -108,8 +108,6 @@ class Extractor(AbstractLoadSaver):
         for nld, gsf in zip(nlds, gsfs):
             self.gsf.append(Vector(path=gsf))
             self.nld.append(Vector(path=nld))
-        self.check_unconstrained_results()
-        return
 
     def extract_from(self, ensemble: Optional[Ensemble] = None,
                      trapezoid: Optional[Action] = None,
