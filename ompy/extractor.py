@@ -14,6 +14,7 @@ from .matrix import Matrix
 from .vector import Vector
 from .decomposition import chisquare_diagonal, nld_T_product
 from .action import Action
+from .abstract_load_saver import AbstractLoadSaver
 
 if 'JPY_PARENT_PID' in os.environ:
     from tqdm import tqdm_notebook as tqdm
@@ -23,7 +24,7 @@ else:
 LOG = logging.getLogger(__name__)
 
 
-class Extractor:
+class Extractor(AbstractLoadSaver):
     """Extracts nld and γSF from an Ensemble or a Matrix
 
     Basically a wrapper around a minimization routine with bookeeping.
@@ -67,8 +68,7 @@ class Extractor:
     """
     def __init__(self, ensemble: Optional[Ensemble] = None,
                  trapezoid: Optional[Action] = None,
-                 path: Optional[Union[str, Path]] =
-                 'saved_run/extractor'):
+                 path: Optional[Union[str, Path]] = 'saved_run/extractor'):
         """
         ensemble (Ensemble, optional): see above
         trapezoid (Action[Matrix], optional): see above
@@ -99,6 +99,17 @@ class Extractor:
     def __call__(self, ensemble: Optional[Ensemble] = None,
                  trapezoid: Optional[Action] = None):
         return self.extract_from(ensemble, trapezoid)
+
+    def load(self):
+        gsfs = list(self.path.glob("gsf_[0-9]*.*"))
+        nlds = list(self.path.glob("nld_[0-9]*.*"))
+        assert len(gsfs) == len(nlds), \
+            "Ensemble NLD/GSF corrupt"
+        for nld, gsf in zip(nlds, gsfs):
+            self.gsf.append(Vector(path=gsf))
+            self.nld.append(Vector(path=nld))
+        self.check_unconstrained_results()
+        return
 
     def extract_from(self, ensemble: Optional[Ensemble] = None,
                      trapezoid: Optional[Action] = None,
