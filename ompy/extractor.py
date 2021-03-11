@@ -5,7 +5,7 @@ import logging
 from contextlib import redirect_stdout
 from uncertainties import unumpy
 import os
-import fnmatch
+
 from pathlib import Path
 from typing import Optional, Union, Any, Tuple, List
 from scipy.optimize import minimize
@@ -14,7 +14,6 @@ from .matrix import Matrix
 from .vector import Vector
 from .decomposition import chisquare_diagonal, nld_T_product
 from .action import Action
-from .abstract_load_saver import AbstractLoadSaver
 
 if 'JPY_PARENT_PID' in os.environ:
     from tqdm import tqdm_notebook as tqdm
@@ -24,7 +23,7 @@ else:
 LOG = logging.getLogger(__name__)
 
 
-class Extractor(AbstractLoadSaver):
+class Extractor:
     """Extracts nld and γSF from an Ensemble or a Matrix
 
     Basically a wrapper around a minimization routine with bookeeping.
@@ -32,8 +31,7 @@ class Extractor(AbstractLoadSaver):
     the desired shape, nuclear level density (nld) and gamma strength function
     (gsf/γSF) are extracted. The results are exposed in the attributes
     self.nld and self.gsf, as well as saved to disk. The saved results are
-    used if filenames match (and `regenerate` is `False`, or can be loaded
-    manually with `load()`.
+    used if filenames match, or can be loaded manually with `load()`.
 
     The method `decompose(matrix, [std])` extracts the nld and gsf from a
     single Matrix.
@@ -49,9 +47,7 @@ class Extractor(AbstractLoadSaver):
         trapezoid (Action[Matrix]): The Action cutting the matrices of the
             Ensemble into the desired shape where from the nld and gsf will be
             extracted from.
-        path (path): The path to save and/or load nld and gsf to/from. If given
-            the class will load nld and gsf if such files are found.
-            Defaults to 'saved_run/extractor' if nothing is given.
+        path (path): The path to save and/or load nld and gsf to/from.
         extend_diagonal_by_resolution (bool, optional): If `True`,
             the fit will be extended beyond Ex=Eg by the (FWHM) of the
             resolution. Remember to set the resolution according to your
@@ -68,23 +64,29 @@ class Extractor(AbstractLoadSaver):
         - If path is given, it tries to load. If path is later set,
           it is not created. This is a very common pattern. Consider
           superclassing the disk book-keeping.
-        - Add unit tests
     """
-    def __init__(self,
-                 path: Optional[Union[str, Path]] = None):
+    def __init__(self, ensemble: Optional[Ensemble] = None,
+                 trapezoid: Optional[Action] = None,
+                 path: Optional[Union[str, Path]] =
+                 'saved_run/extractor'):
         """
-        Args:
-            path (Path or str, optional): see above
+        ensemble (Ensemble, optional): see above
+        trapezoid (Action[Matrix], optional): see above
+        path (Path or str, optional): see above
         """
-
+        self.ensemble = ensemble
         self.regenerate = False
         self.method = 'Powell'
         self.options = {'disp': True, 'ftol': 1e-3, 'maxfev': None}
         self.nld: List[Vector] = []
         self.gsf: List[Vector] = []
+        self.trapezoid = trapezoid
 
         if path is None:
-            path = 'saved_run/extractor'
+            self.path = None
+        else:
+            self.path = Path(path)
+            self.path.mkdir(exist_ok=True, parents=True)
 
         self.x0 = None
         self.randomize_initial_values: bool = True
@@ -94,13 +96,12 @@ class Extractor(AbstractLoadSaver):
         self.extend_fit_by_resolution: bool = False
         self.resolution_Ex = 150  # keV
 
-        super(Extractor, self).__init__(path, True)
-
-    def __call__(self, ensemble: Ensemble, trapezoid: Action):
+    def __call__(self, ensemble: Optional[Ensemble] = None,
+                 trapezoid: Optional[Action] = None):
         return self.extract_from(ensemble, trapezoid)
 
-    def extract_from(self, ensemble: Ensemble,
-                     trapezoid: Action,
+    def extract_from(self, ensemble: Optional[Ensemble] = None,
+                     trapezoid: Optional[Action] = None,
                      regenerate: Optional[bool] = None):
         """Decompose each first generation matrix in an Ensemble
 
@@ -109,82 +110,83 @@ class Extractor(AbstractLoadSaver):
         attributes self.nld and self.gsf.
 
         Args:
-            ensemble (Ensembl): The ensemble to extract nld and gsf from.
-            trapezoid (Action): An Action describing the cut to apply
+            ensemble (Ensemble, optional): The ensemble to extract nld and gsf
+                from. Can be provided in when initializing instead.
+            trapezoid (Action, optional): An Action describing the cut to apply
                 to the matrices to obtain the desired region for extracting nld
                 and gsf.
             regenerate (bool, optional): Whether to regenerate all nld and gsf
                 even if they are found on disk.
-        """
 
+        Raises:
+            ValueError: If no Ensemble instance is provided here or earlier.
+        """
+        if ensemble is not None:
+            self.ensemble = ensemble
+        elif self.ensemble is None:
+            raise ValueError("ensemble must be given")
+        if trapezoid is not None:
+            self.trapezoid = trapezoid
+        elif self.trapezoid is None:
+            raise ValueError("A 'trapezoid' cut must be given'")
         if regenerate is None:
             regenerate = self.regenerate
-        path = Path(self.path)
+        self.path = Path(self.path)
 
         nlds = []
         gsfs = []
-
-        if not regenerate:
-            try:  # If successfully loaded, we are done!
-                LOG.debug(f"loading from {path}")
-                self.load(self.path)
-                return None
-            except RuntimeError:  # We still need to do some number crunching
-                LOG.debug(f"Error loading, regenerating NLD and GSF")
-                pass
-
         np.random.seed(self.seed)  # seed also in `__init__`
-        for i in tqdm(range(ensemble.size)):
-            nld, gsf = self.step(ensemble, trapezoid, i)
-            nlds.append(nld)
-            gsfs.append(gsf)
+        for i in tqdm(range(self.ensemble.size)):
+            nld_path = self.path / f'nld_{i}.npy'
+            gsf_path = self.path / f'gsf_{i}.npy'
+            if nld_path.exists() and gsf_path.exists() and not regenerate:
+                LOG.debug(f"loading from {nld_path} and {gsf_path}")
+                nlds.append(Vector(path=nld_path))
+                gsfs.append(Vector(path=gsf_path))
+            else:
+                nld, gsf = self.step(i)
+                nld.save(nld_path)
+                gsf.save(gsf_path)
+                nlds.append(nld)
+                gsfs.append(gsf)
 
         self.nld = nlds
         self.gsf = gsfs
-        self.save(self.path)
 
-    def step(self, ensemble: Ensemble, trapezoid: Action,
-             num: int) -> Tuple[Vector, Vector]:
-        """ Wrapper around _extract in order to be consistent with other
-        classes
+        self.check_unconstrained_results()
+
+    def step(self, num: int) -> Tuple[Vector, Vector]:
+        """ Wrapper around _extract in order to be consistent with other classes
 
         Args:
-            ensemble (Ensemble): The ensemble to extract nld and gsf from.
-            trapezoid (Action): An Action describing the cut to apply
-                to the matrices to obtain the desired region for extracting nld
-                and gsf.
             num: Number of the fg matrix to extract
         """
-        nld, gsf = self._extract(ensemble, trapezoid, num)
+        nld, gsf = self._extract(num)
         return nld, gsf
 
-    def _extract(self, ensemble: Ensemble, trapezoid: Action,
-                 num: int) -> Tuple[Vector, Vector]:
+    def _extract(self, num: int) -> Tuple[Vector, Vector]:
         """ Extract nld and gsf from matrix number i from Ensemble
 
         Args:
-            ensemble (Ensemble): The ensemble to extract nld and gsf from.
-            trapezoid (Action): An Action describing the cut to apply
-                to the matrices to obtain the desired region for extracting nld
-                and gsf.
             num: Number of the fg matrix to extract
 
         Returns:
             The nld and gsf as Vectors
         """
-
-        matrix = ensemble.get_firstgen(num).copy()
-        std = ensemble.std_firstgen.copy()
+        assert self.ensemble is not None
+        assert self.trapezoid is not None
+        matrix = self.ensemble.get_firstgen(num).copy()
+        std = self.ensemble.std_firstgen.copy()
         # following lines might be superfluous now:
         # ensure same cuts for all ensemble members if Eg_max is not given
         # (thus auto-determined) in the trapezoid.
         if num == 0:
-            trapezoid.act_on(matrix)
-            trapezoid.curry(Eg_max=matrix.Eg[-1])
-            trapezoid.act_on(std)
+            self.trapezoid.act_on(matrix)
+            self.trapezoid.curry(Eg_max=matrix.Eg[-1])
+            self.trapezoid.act_on(std)
         else:
-            trapezoid.act_on(matrix)
-            trapezoid.act_on(std)
+            self.trapezoid.act_on(matrix)
+            self.trapezoid.act_on(std)
         nld, gsf = self.decompose(matrix, std)
         return nld, gsf
 
@@ -289,7 +291,7 @@ class Extractor(AbstractLoadSaver):
         T = res.x[:matrix.Eg.size]
         nld = res.x[matrix.Eg.size:]
 
-        # Set elements that couldn't be constrained (no entries) to np.na
+        # Set elements that couldn't be constrained (no entries) to np.nan
         nld_counts0, T_counts0 = self.constraining_counts(matrix, resolution)
         T[T_counts0 == 0] = np.nan
         nld[nld_counts0 == 0] = np.nan
@@ -351,66 +353,6 @@ class Extractor(AbstractLoadSaver):
         x0 = np.append(T0, nld0)
         assert np.isfinite(x0).all
         return x0
-
-    def save(self, path: Union[str, Path]):
-        """Save an ensemble of extracted NLD & GSF from disk.
-
-        Args:
-            path: Path to folder to save the ensemble
-
-        Raises:
-            RuntimeError if no NLD and GSF are set.
-            AssertionError if the number NLD and GSF are unequal.
-        """
-
-        path = Path(path)
-
-        assert len(self.nld) == len(self.gsf), \
-            "Number of NLD files doesn't match the number of GSF files."
-
-        # Due to the assertion above, we are sure that NLD and GSF have
-        # the same length. We only need to check one of them!
-        if len(self.nld) <= 0:
-            raise RuntimeError("No NLD or GSF set")
-
-        for (i, (nld, gsf)) in enumerate(zip(self.nld, self.gsf)):
-            nld_path = self.path / f'nld_{i}.npy'
-            gsf_path = self.path / f'gsf_{i}.npy'
-            nld.save(nld_path)
-            gsf.save(gsf_path)
-
-    def load(self, path: Union[str, Path]):
-        """Load an ensemble of extracted NLD & GSF from disk.
-
-        Args:
-            path: Path to folder with ensemble
-
-        Raises:
-            ValueError if path isn't a folder or doesn't exist.
-            RuntimeError if there are no NLD & GSF files in the provided path.
-            AssertionError if the number NLD and GSF are unequal.
-        """
-
-        path = Path(path)
-
-        if not path.is_dir():
-            raise ValueError(f"Path '{path}' does not exist \
-            or is not a folder.")
-
-        # Count number of files with name gsf_*.npy and nld_*.npy
-        # in the folder where these are stored.
-        gsfs = list(path.glob("gsf_[0-9]*.*"))
-        nlds = list(path.glob("nld_[0-9]*.*"))
-
-        assert len(gsfs) == len(nlds), \
-            "Ensemble NLD/GSF corrupt"
-
-        if len(gsfs) == 0:
-            raise RuntimeError("No NLD and GSF files found.")
-
-        for (gsf, nld) in zip(gsfs, nlds):
-            self.gsf.append(Vector(path=gsf))
-            self.nld.append(Vector(path=nld))
 
     @staticmethod
     def x0_BSFG(E_nld: np.ndarray, E0: float = -.2, a: float = 15):
@@ -536,8 +478,7 @@ class Extractor(AbstractLoadSaver):
 
     @staticmethod
     def resolution_Eg(matrix: Matrix) -> np.ndarray:
-        """Resolution along Eg axis for each Ex. Defaults in this class are for
-        OSCAR.
+        """Resolution along Eg axis for each Ex. Defaults in this class are for OSCAR.
 
         Args:
             matrix (Matrix): Matrix for which the sesoluton shall be calculated
@@ -584,6 +525,31 @@ class Extractor(AbstractLoadSaver):
             ax[1].set_yscale("log")
 
         return fig, ax
+
+    def check_unconstrained_results(self) -> bool:
+        """ Checks results for unconstrained elements (np.nan)
+
+        Returns:
+            bool: True if results contain unconstrained elements, else False
+        """
+        contains_nan = False
+        for i, vec in enumerate(self.nld):
+            if np.isnan(vec.values).any():
+                contains_nan = True
+                LOG.warning(f"nld #{i} contains nan's.\n"
+                            "Consider removing them e.g. with:\n"
+                            "# for nld in extractor.nld:\n"
+                            "#     nld.cut_nan()\n")
+
+        for i, vec in enumerate(self.nld):
+            if np.isnan(vec.values).any():
+                contains_nan = True
+                LOG.warning(f"gsf #{i} contains nan's.\n"
+                            "Consider removing them e.g. with:\n"
+                            "# for gsf in extractor.gsf:\n"
+                            "#     gsf.cut_nan()\n")
+
+        return contains_nan
 
     def nld_mean(self) -> np.ndarray:
         return np.nanmean([nld.values for nld in self.nld], axis=0)
